@@ -1,0 +1,6 @@
+﻿{
+    "source":  "https://jetkvm.com/install-tailscale.sh",
+    "fetched_utc":  "2026-05-22T15:13:58Z",
+    "sha256":  "e2a6f9c9d51879c98f60c346ba9ca757414fc27fad8f419c45fa9bba8175316b",
+    "note":  "JetKVM installer copy. Upstream script does not publish a separate script version; use fetched_utc and sha256 as the version marker."
+}
