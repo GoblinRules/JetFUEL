@@ -10,7 +10,7 @@ It is designed for non-technical users: the wizard walks through prechecks, SSH 
 
 ## Quick Start
 
-Run from PowerShell:
+Open PowerShell as Administrator, then run:
 
 ```powershell
 irm https://raw.githubusercontent.com/GoblinRules/JetFUEL/main/Install-JetFuel.ps1 | iex
@@ -23,6 +23,8 @@ That bootstrap downloads JetFUEL into:
 ```
 
 Then it launches the wizard.
+
+Administrator PowerShell is recommended because the bootstrap may need to install or detect Windows prerequisites such as Git Bash.
 
 ## Run From A Local Clone
 
