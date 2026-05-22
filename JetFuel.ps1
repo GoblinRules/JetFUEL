@@ -1232,7 +1232,7 @@ function Start-JetFuelGuiV2 {
     $form.Text = "JetFUEL - JetKVM Tailscale Setup"
     $form.StartPosition = "CenterScreen"
     $form.Size = [Drawing.Size]::new(1120, 900)
-    $form.MinimumSize = [Drawing.Size]::new(920, 760)
+    $form.MinimumSize = [Drawing.Size]::new(760, 620)
     $form.AutoScaleMode = [Windows.Forms.AutoScaleMode]::Dpi
     $form.BackColor = $ui.Window
 
@@ -1240,8 +1240,8 @@ function Start-JetFuelGuiV2 {
     $split.Dock = "Fill"
     $split.Orientation = [Windows.Forms.Orientation]::Horizontal
     $split.SplitterWidth = 7
-    $split.Panel1MinSize = 640
-    $split.Panel2MinSize = 120
+    $split.Panel1MinSize = 360
+    $split.Panel2MinSize = 110
     $split.BackColor = $ui.Border
     $form.Controls.Add($split)
     $form.Add_Shown({
@@ -1426,6 +1426,7 @@ function Start-JetFuelGuiV2 {
     $setupPage = [Windows.Forms.Panel]::new()
     $setupPage.Dock = "Fill"
     $setupPage.BackColor = $ui.Window
+    $setupPage.AutoScroll = $true
     $tailscalePage = [Windows.Forms.Panel]::new()
     $tailscalePage.Dock = "Fill"
     $tailscalePage.BackColor = $ui.Window
@@ -1437,17 +1438,18 @@ function Start-JetFuelGuiV2 {
     $helpPage.BackColor = $ui.Window
 
     $setupLayout = [Windows.Forms.TableLayoutPanel]::new()
-    $setupLayout.Dock = "Fill"
+    $setupLayout.Dock = "Top"
+    $setupLayout.Height = 1008
     $setupLayout.AutoScroll = $false
     $setupLayout.BackColor = $ui.Window
-    $setupLayout.ColumnCount = 2
-    $setupLayout.RowCount = 4
-    $setupLayout.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 56)) | Out-Null
-    $setupLayout.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 44)) | Out-Null
-    $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 150)) | Out-Null
-    $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 260)) | Out-Null
-    $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
-    $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 58)) | Out-Null
+    $setupLayout.ColumnCount = 1
+    $setupLayout.RowCount = 5
+    $setupLayout.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
+    $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 142)) | Out-Null
+    $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 246)) | Out-Null
+    $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 384)) | Out-Null
+    $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 176)) | Out-Null
+    $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 60)) | Out-Null
     $setupPage.Controls.Add($setupLayout)
 
     $tailscaleLayout = [Windows.Forms.TableLayoutPanel]::new()
@@ -1575,10 +1577,8 @@ Status log
     $httpStatus = New-RowLabel "[ ] JetKVM web UI: not checked"
     $preflightButton = [Windows.Forms.Button]::new()
     $preflightButton.Text = "Run preflight"
-    $preflightButton.Dock = "None"
-    $preflightButton.Anchor = "None"
-    $preflightButton.Size = [Drawing.Size]::new(132, 34)
-    $preflightButton.Margin = [Windows.Forms.Padding]::new(6)
+    $preflightButton.Dock = "Fill"
+    $preflightButton.Margin = [Windows.Forms.Padding]::new(8, 2, 8, 2)
     Set-ButtonStyle $preflightButton "Secondary"
     $preGrid.Controls.Add($bashStatus, 0, 0)
     $preGrid.Controls.Add($kvmStatus, 1, 0)
@@ -1587,7 +1587,6 @@ Status log
     $preGrid.Controls.Add($sshLoginStatus, 0, 2)
     $preGrid.SetColumnSpan($sshLoginStatus, 2)
     $preGrid.Controls.Add($preflightButton, 2, 0)
-    $preGrid.SetRowSpan($preflightButton, 2)
     $setupLayout.Controls.Add($precheckGroup, 0, 0)
 
     $step2Group = New-Group "Step 2 - JetKVM and SSH"
@@ -1634,12 +1633,15 @@ Status log
 
     $step3Group = New-Group "Step 3 - Tailscale options"
     $step3Grid = New-StepGrid 10
-    $step3Grid.Dock = "Top"
-    $step3Grid.Height = 420
+    $step3Grid.Dock = "Fill"
     $step3Grid.ColumnStyles.Clear()
     $step3Grid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, 155)) | Out-Null
     $step3Grid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
     $step3Grid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, 10)) | Out-Null
+    $step3Grid.RowStyles.Clear()
+    foreach ($height in @(38, 38, 34, 38, 42, 38, 34, 38, 42, 36)) {
+        $step3Grid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, $height)) | Out-Null
+    }
     $step3Group.Controls.Add($step3Grid)
     $installerSourceBox = [Windows.Forms.ComboBox]::new()
     $installerSourceBox.Dock = "Fill"
@@ -1691,16 +1693,15 @@ Status log
     $step3Grid.SetColumnSpan($versionNote, 2)
     $step3Grid.Controls.Add($cleanCheck, 1, 9)
     $step3Grid.SetColumnSpan($cleanCheck, 2)
-    $setupLayout.Controls.Add($step3Group, 1, 0)
-    $setupLayout.SetRowSpan($step3Group, 3)
+    $setupLayout.Controls.Add($step3Group, 0, 2)
 
     $manualSteps = New-Group "Step 4 - Required JetKVM UI steps"
     $manualSteps.BackColor = [Drawing.Color]::FromArgb(69, 46, 16)
     $manualSteps.ForeColor = [Drawing.Color]::FromArgb(253, 230, 138)
     $manualGrid = New-StepGrid 3
     $manualGrid.RowStyles.Clear()
-    $manualGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 70)) | Out-Null
-    $manualGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 40)) | Out-Null
+    $manualGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 82)) | Out-Null
+    $manualGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 42)) | Out-Null
     $manualGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
     $manualSteps.Controls.Add($manualGrid)
     $stepsText = [Windows.Forms.Label]::new()
@@ -1730,7 +1731,7 @@ Status log
     $manualGrid.SetColumnSpan($securityText, 2)
     $manualGrid.Controls.Add($copyKeyButton, 2, 0)
     $manualGrid.Controls.Add($openUiButton2, 2, 1)
-    $setupLayout.Controls.Add($manualSteps, 0, 2)
+    $setupLayout.Controls.Add($manualSteps, 0, 3)
 
     $statusLabel = [Windows.Forms.Label]::new()
     $statusLabel.Text = "Ready"
@@ -1752,8 +1753,7 @@ Status log
     Set-ButtonStyle $runButton "Primary"
     $setupActionPanel.Controls.Add($statusLabel, 0, 0)
     $setupActionPanel.Controls.Add($runButton, 1, 0)
-    $setupLayout.Controls.Add($setupActionPanel, 0, 3)
-    $setupLayout.SetColumnSpan($setupActionPanel, 2)
+    $setupLayout.Controls.Add($setupActionPanel, 0, 4)
 
     $actionPanel = [Windows.Forms.TableLayoutPanel]::new()
     $actionPanel.Dock = "Top"
