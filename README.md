@@ -95,6 +95,16 @@ tskey-auth-
 
 The key ID shown in the Tailscale admin table, often ending in `CNTRL`, is not enough.
 
+## Troubleshooting
+
+- Run PowerShell as Administrator for the smoothest setup.
+- If Git Bash is missing, JetFUEL can install Git for Windows only when `winget` is installed and working.
+- If `winget` says the application cannot be started, repair or reinstall Microsoft App Installer from the Microsoft Store, or install Git for Windows manually.
+- If the JetKVM stays in `NeedsLogin`, use `Check Tailscale` and look for a login URL in the status log.
+- Tailscale auth keys must be full pre-authentication secrets beginning with `tskey-auth-`. The key ID ending in `CNTRL` is not enough.
+- Tailscale installation may fail if the JetKVM itself is set up/authenticated using Google auth. Use local JetKVM authentication for this SSH/Developer Mode flow.
+- If SSH login fails, confirm Developer Mode is enabled, the public key was saved in JetKVM Settings > Advanced, and the selected private key matches the public key.
+
 ## Disclaimer
 
 JetFUEL is an unofficial helper tool. It is not made by, endorsed by, or supported by JetKVM or Tailscale.

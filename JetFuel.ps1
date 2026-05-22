@@ -21,6 +21,39 @@ function Get-CommandPath {
     return $null
 }
 
+function Test-WingetAvailable {
+    $winget = Get-CommandPath -Name "winget.exe"
+    if (-not $winget) {
+        return @{
+            Ok = $false
+            Path = $null
+            Message = "winget was not found. Install or repair Microsoft App Installer from the Microsoft Store, or install Git for Windows manually."
+        }
+    }
+
+    try {
+        $version = & $winget --version 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            return @{
+                Ok = $false
+                Path = $winget
+                Message = "winget exists but did not run successfully. Output: $($version -join ' ')"
+            }
+        }
+        return @{
+            Ok = $true
+            Path = $winget
+            Message = "winget available: $($version -join ' ')"
+        }
+    } catch {
+        return @{
+            Ok = $false
+            Path = $winget
+            Message = "winget exists but Windows could not start it: $($_.Exception.Message)"
+        }
+    }
+}
+
 function Get-GitBashPath {
     $candidates = @(
         "${env:ProgramFiles}\Git\bin\bash.exe",
@@ -103,6 +136,17 @@ function Select-BashForInstall {
             throw "Preflight cancelled. Git Bash was not installed and WSL bash was not selected."
         }
     } else {
+        $wingetState = Test-WingetAvailable
+        if (-not $wingetState.Ok) {
+            [Windows.Forms.MessageBox]::Show(
+                "Git Bash was not found, and JetFUEL cannot install Git automatically because winget is missing or broken.`r`n`r`n$($wingetState.Message)`r`n`r`nInstall Git for Windows manually from https://git-scm.com/download/win, then run this wizard again.",
+                "Git Bash required",
+                "OK",
+                "Warning"
+            ) | Out-Null
+            throw $wingetState.Message
+        }
+
         $choice = [Windows.Forms.MessageBox]::Show(
             "Git Bash was not found. Install Git for Windows now using winget?",
             "Install Git Bash",
@@ -122,10 +166,12 @@ function Install-GitForWindows {
     param([scriptblock]$Log)
 
     & $Log "Git Bash was not found. Trying to install Git for Windows with winget..."
-    $winget = Get-CommandPath -Name "winget.exe"
-    if (-not $winget) {
-        throw "winget is not available. Install Git for Windows from https://git-scm.com/download/win, then run this wizard again."
+    $wingetState = Test-WingetAvailable
+    if (-not $wingetState.Ok) {
+        throw $wingetState.Message
     }
+    $winget = $wingetState.Path
+    & $Log $wingetState.Message
 
     $args = @(
         "install",
@@ -1088,6 +1134,13 @@ function Start-JetFuelGui {
             Assert-ValidIpOrHost -Value $ip
 
             & $log "Checking Windows prerequisites..."
+            $wingetState = Test-WingetAvailable
+            if ($wingetState.Ok) {
+                & $log $wingetState.Message
+            } else {
+                & $log ("Warning: " + $wingetState.Message)
+            }
+
             $bashInfo = Select-BashForInstall -Log $log
             $bash = $bashInfo.Path
             $bashKind = $bashInfo.Kind
@@ -1233,7 +1286,8 @@ function Start-JetFuelGuiV2 {
     $form.StartPosition = "CenterScreen"
     $form.Size = [Drawing.Size]::new(1120, 900)
     $form.MinimumSize = [Drawing.Size]::new(760, 620)
-    $form.AutoScaleMode = [Windows.Forms.AutoScaleMode]::Dpi
+    $form.AutoScaleMode = [Windows.Forms.AutoScaleMode]::None
+    $form.Font = [Drawing.Font]::new("Segoe UI", 9)
     $form.BackColor = $ui.Window
 
     $split = [Windows.Forms.SplitContainer]::new()
@@ -1330,7 +1384,7 @@ function Start-JetFuelGuiV2 {
         $box = [Windows.Forms.TextBox]::new()
         $box.Text = $Text
         $box.Dock = "Fill"
-        $box.Margin = [Windows.Forms.Padding]::new(0, 5, 10, 5)
+        $box.Margin = [Windows.Forms.Padding]::new(0, 3, 10, 3)
         $box.BorderStyle = "FixedSingle"
         $box.BackColor = $ui.Input
         $box.ForeColor = $ui.InputText
@@ -1371,7 +1425,7 @@ function Start-JetFuelGuiV2 {
         $CheckBox.ForeColor = $ui.Text
         $CheckBox.Font = [Drawing.Font]::new("Segoe UI", 9)
         $CheckBox.BackColor = $ui.Surface
-        $CheckBox.Margin = [Windows.Forms.Padding]::new(0, 5, 10, 5)
+        $CheckBox.Margin = [Windows.Forms.Padding]::new(0, 3, 10, 5)
     }
 
     $pageShell = [Windows.Forms.TableLayoutPanel]::new()
@@ -1439,16 +1493,16 @@ function Start-JetFuelGuiV2 {
 
     $setupLayout = [Windows.Forms.TableLayoutPanel]::new()
     $setupLayout.Dock = "Top"
-    $setupLayout.Height = 1008
+    $setupLayout.Height = 1032
     $setupLayout.AutoScroll = $false
     $setupLayout.BackColor = $ui.Window
     $setupLayout.ColumnCount = 1
     $setupLayout.RowCount = 5
     $setupLayout.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
-    $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 142)) | Out-Null
-    $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 246)) | Out-Null
-    $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 384)) | Out-Null
-    $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 176)) | Out-Null
+    $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 150)) | Out-Null
+    $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 236)) | Out-Null
+    $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 416)) | Out-Null
+    $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 186)) | Out-Null
     $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 60)) | Out-Null
     $setupPage.Controls.Add($setupLayout)
 
@@ -1534,6 +1588,14 @@ Settings tab
   [-v|--version <tailscale-version>] [-y|--yes] [-c|--clean] <JetKVM-IP> [-- <tailscale up args...>]
 - Custom scripts must install/configure Tailscale on the JetKVM, handle reboot/return, and print any Tailscale login URL.
 
+Troubleshooting
+- If Git Bash is missing, JetFUEL can install Git for Windows only when winget is installed and working.
+- If winget reports that the application cannot be started, repair or reinstall Microsoft App Installer from the Microsoft Store, or install Git for Windows manually.
+- If the JetKVM stays in NeedsLogin, use Check Tailscale and look for a login URL in the log.
+- Tailscale auth keys should be full pre-authentication secrets beginning with tskey-auth-. The key ID ending CNTRL is not enough.
+- Tailscale installation may fail if the JetKVM itself is set up/authenticated using Google auth. Use local JetKVM authentication for this SSH/Developer Mode flow.
+- If SSH login fails, confirm Developer Mode is enabled, the public key was saved in JetKVM Settings > Advanced, and the selected private key matches the public key.
+
 Status log
 - Shows the detailed output from preflight, install, repair, remove, and checks.
 - Use Copy logs when reporting an issue or saving the output.
@@ -1572,6 +1634,7 @@ Status log
     $precheckGroup.Controls.Add($preGrid)
     $bashStatus = New-RowLabel "[ ] Git Bash: not checked"
     $sshStatus = New-RowLabel "[ ] SSH tools: not checked"
+    $wingetStatus = New-RowLabel "[ ] winget: not checked"
     $sshLoginStatus = New-RowLabel "[ ] JetKVM SSH login: enable Developer Mode first"
     $kvmStatus = New-RowLabel "[ ] JetKVM network: enter IP, then preflight"
     $httpStatus = New-RowLabel "[ ] JetKVM web UI: not checked"
@@ -1584,15 +1647,15 @@ Status log
     $preGrid.Controls.Add($kvmStatus, 1, 0)
     $preGrid.Controls.Add($sshStatus, 0, 1)
     $preGrid.Controls.Add($httpStatus, 1, 1)
-    $preGrid.Controls.Add($sshLoginStatus, 0, 2)
-    $preGrid.SetColumnSpan($sshLoginStatus, 2)
+    $preGrid.Controls.Add($wingetStatus, 0, 2)
+    $preGrid.Controls.Add($sshLoginStatus, 1, 2)
     $preGrid.Controls.Add($preflightButton, 2, 0)
     $setupLayout.Controls.Add($precheckGroup, 0, 0)
 
     $step2Group = New-Group "Step 2 - JetKVM and SSH"
     $step2Grid = New-StepGrid 4
     $step2Grid.RowStyles.Clear()
-    foreach ($height in @(48, 48, 48, 48)) {
+    foreach ($height in @(44, 44, 44, 44)) {
         $step2Grid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, $height)) | Out-Null
     }
     $step2Group.Controls.Add($step2Grid)
@@ -1639,14 +1702,14 @@ Status log
     $step3Grid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
     $step3Grid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, 10)) | Out-Null
     $step3Grid.RowStyles.Clear()
-    foreach ($height in @(38, 38, 34, 38, 42, 38, 34, 38, 42, 36)) {
+    foreach ($height in @(40, 36, 34, 40, 42, 40, 34, 40, 42, 38)) {
         $step3Grid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, $height)) | Out-Null
     }
     $step3Group.Controls.Add($step3Grid)
     $installerSourceBox = [Windows.Forms.ComboBox]::new()
     $installerSourceBox.Dock = "Fill"
     $installerSourceBox.DropDownStyle = [Windows.Forms.ComboBoxStyle]::DropDownList
-    $installerSourceBox.Margin = [Windows.Forms.Padding]::new(0, 5, 10, 5)
+    $installerSourceBox.Margin = [Windows.Forms.Padding]::new(0, 3, 10, 3)
     $installerSourceBox.BackColor = $ui.Input
     $installerSourceBox.ForeColor = $ui.InputText
     $installerSourceBox.Font = [Drawing.Font]::new("Segoe UI", 9)
@@ -1700,8 +1763,8 @@ Status log
     $manualSteps.ForeColor = [Drawing.Color]::FromArgb(253, 230, 138)
     $manualGrid = New-StepGrid 3
     $manualGrid.RowStyles.Clear()
-    $manualGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 82)) | Out-Null
-    $manualGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 42)) | Out-Null
+    $manualGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 86)) | Out-Null
+    $manualGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 44)) | Out-Null
     $manualGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
     $manualSteps.Controls.Add($manualGrid)
     $stepsText = [Windows.Forms.Label]::new()
@@ -2005,6 +2068,15 @@ Status log
             Assert-ValidIpOrHost -Value $ip
 
             & $log "Checking Windows prerequisites..."
+            $wingetState = Test-WingetAvailable
+            if ($wingetState.Ok) {
+                & $log $wingetState.Message
+                & $setIndicator $wingetStatus "OK" "winget available"
+            } else {
+                & $log ("Warning: " + $wingetState.Message)
+                & $setIndicator $wingetStatus "Warn" "winget missing/broken"
+            }
+
             $bashInfo = Select-BashForInstall -Log $log
             $bash = $bashInfo.Path
             $bashKind = $bashInfo.Kind
@@ -2118,6 +2190,9 @@ Status log
         } catch {
             & $log ("ERROR: " + $_.Exception.Message)
             & $setBusy $false "Failed"
+            if ($_.Exception.Message -match "winget|App Installer") { & $setIndicator $wingetStatus "Fail" "winget problem" }
+            if ($_.Exception.Message -match "bash|Git") { & $setIndicator $bashStatus "Fail" "Git Bash problem" }
+            if ($_.Exception.Message -match "SSH|ssh") { & $setIndicator $sshStatus "Fail" "SSH problem" }
             [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null
         }
     }
