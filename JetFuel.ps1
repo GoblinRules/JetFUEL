@@ -31,6 +31,8 @@ function Get-CleanExceptionMessage {
     if ($message -match "Program '.*?' failed to run: (.+?)(?:At .+?:line|\r?\n\s*At )") {
         return $matches[1].Trim()
     }
+    $message = $message -replace '(?s)\s*At [A-Z]:\\.*?:line\s+\d+.*$', ''
+    $message = $message -replace '(?s)At [A-Z]:\\.*?:line\s+\d+.*$', ''
     return $message.Trim()
 }
 
@@ -1545,17 +1547,17 @@ function Start-JetFuelGuiV2 {
 
     $setupLayout = [Windows.Forms.TableLayoutPanel]::new()
     $setupLayout.Dock = "Top"
-    $setupLayout.Height = 1032
+    $setupLayout.Height = 872
     $setupLayout.AutoScroll = $false
     $setupLayout.BackColor = $ui.Window
     $setupLayout.ColumnCount = 1
     $setupLayout.RowCount = 5
     $setupLayout.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
-    $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 150)) | Out-Null
-    $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 236)) | Out-Null
-    $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 416)) | Out-Null
-    $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 186)) | Out-Null
-    $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 60)) | Out-Null
+    $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 132)) | Out-Null
+    $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 210)) | Out-Null
+    $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 342)) | Out-Null
+    $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 134)) | Out-Null
+    $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 54)) | Out-Null
     $setupPage.Controls.Add($setupLayout)
 
     $tailscaleLayout = [Windows.Forms.TableLayoutPanel]::new()
@@ -1707,7 +1709,7 @@ Status log
     $step2Group = New-Group "Step 2 - JetKVM and SSH"
     $step2Grid = New-StepGrid 4
     $step2Grid.RowStyles.Clear()
-    foreach ($height in @(44, 44, 44, 44)) {
+    foreach ($height in @(40, 40, 38, 40)) {
         $step2Grid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, $height)) | Out-Null
     }
     $step2Group.Controls.Add($step2Grid)
@@ -1754,7 +1756,7 @@ Status log
     $step3Grid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
     $step3Grid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, 10)) | Out-Null
     $step3Grid.RowStyles.Clear()
-    foreach ($height in @(40, 36, 34, 40, 42, 40, 34, 40, 42, 38)) {
+    foreach ($height in @(34, 30, 30, 34, 34, 34, 30, 34, 30, 32)) {
         $step3Grid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, $height)) | Out-Null
     }
     $step3Group.Controls.Add($step3Grid)
@@ -1815,17 +1817,17 @@ Status log
     $manualSteps.ForeColor = [Drawing.Color]::FromArgb(253, 230, 138)
     $manualGrid = New-StepGrid 3
     $manualGrid.RowStyles.Clear()
-    $manualGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 86)) | Out-Null
-    $manualGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 44)) | Out-Null
+    $manualGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 54)) | Out-Null
+    $manualGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 34)) | Out-Null
     $manualGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
     $manualSteps.Controls.Add($manualGrid)
     $stepsText = [Windows.Forms.Label]::new()
-    $stepsText.Text = "Important: the installer cannot continue until Developer Mode SSH is enabled on the JetKVM.`r`n`r`n1. Open the JetKVM UI, set or confirm the local password if wanted, and install any JetKVM system updates from Settings.`r`n2. In Settings > Advanced, enable Developer Mode and paste the public SSH key.`r`n3. Save the JetKVM settings before running the Tailscale install."
+    $stepsText.Text = "Important: Step 5 needs Developer Mode SSH enabled on the JetKVM.`r`n1. Open the JetKVM UI and install any system updates.  2. Settings > Advanced: enable Developer Mode, paste the public SSH key, then save."
     $stepsText.Dock = "Fill"
     $stepsText.ForeColor = [Drawing.Color]::FromArgb(255, 251, 235)
     $stepsText.Font = [Drawing.Font]::new("Segoe UI", 9, [Drawing.FontStyle]::Bold)
     $securityText = [Windows.Forms.Label]::new()
-    $securityText.Text = "Security after setup: once Tailscale is online, you can remove the SSH public key from JetKVM or disable Developer Mode again if you do not need SSH access."
+    $securityText.Text = "After setup: remove the SSH key or disable Developer Mode again if you do not need SSH access."
     $securityText.Dock = "Fill"
     $securityText.ForeColor = [Drawing.Color]::FromArgb(253, 230, 138)
     $securityText.Font = [Drawing.Font]::new("Segoe UI", 9)
