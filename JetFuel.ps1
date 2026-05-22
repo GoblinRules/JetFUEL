@@ -21,6 +21,19 @@ function Get-CommandPath {
     return $null
 }
 
+function Get-CleanExceptionMessage {
+    param([Parameter(Mandatory)]$ErrorRecord)
+
+    if ($ErrorRecord.Exception.InnerException -and -not [string]::IsNullOrWhiteSpace($ErrorRecord.Exception.InnerException.Message)) {
+        return $ErrorRecord.Exception.InnerException.Message
+    }
+    $message = [string]$ErrorRecord.Exception.Message
+    if ($message -match "Program '.*?' failed to run: (.+?)(?:At .+?:line|\r?\n\s*At )") {
+        return $matches[1].Trim()
+    }
+    return $message.Trim()
+}
+
 function Test-WingetAvailable {
     $winget = Get-CommandPath -Name "winget.exe"
     if (-not $winget) {
@@ -32,26 +45,71 @@ function Test-WingetAvailable {
     }
 
     try {
-        $version = & $winget --version 2>&1
-        if ($LASTEXITCODE -ne 0) {
+        $psi = [Diagnostics.ProcessStartInfo]::new()
+        $psi.FileName = $winget
+        $psi.Arguments = "--version"
+        $psi.UseShellExecute = $false
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.CreateNoWindow = $true
+        $process = [Diagnostics.Process]::Start($psi)
+        if (-not $process.WaitForExit(10000)) {
+            try { $process.Kill() } catch {}
             return @{
                 Ok = $false
                 Path = $winget
-                Message = "winget exists but did not run successfully. Output: $($version -join ' ')"
+                Message = "winget exists but did not respond within 10 seconds."
+            }
+        }
+        $output = (($process.StandardOutput.ReadToEnd(), $process.StandardError.ReadToEnd()) -join " ").Trim()
+        if ($process.ExitCode -ne 0) {
+            return @{
+                Ok = $false
+                Path = $winget
+                Message = "winget exists but did not run successfully. Output: $output"
             }
         }
         return @{
             Ok = $true
             Path = $winget
-            Message = "winget available: $($version -join ' ')"
+            Message = "winget available: $output"
         }
     } catch {
+        $cleanMessage = Get-CleanExceptionMessage -ErrorRecord $_
         return @{
             Ok = $false
             Path = $winget
-            Message = "winget exists but Windows could not start it: $($_.Exception.Message)"
+            Message = "winget exists but Windows could not start it: $cleanMessage"
         }
     }
+}
+
+function Open-AppInstallerStorePage {
+    Start-Process "ms-windows-store://pdp/?ProductId=9NBLGGH4NNS1"
+}
+
+function Prompt-WingetRepairOrGitManual {
+    param(
+        [Parameter(Mandatory)]$WingetState
+    )
+
+    $choice = [Windows.Forms.MessageBox]::Show(
+        "Git Bash was not found, and JetFUEL cannot install Git automatically because winget/App Installer is missing or broken.`r`n`r`n$($WingetState.Message)`r`n`r`nYes = open Microsoft Store to install/reinstall App Installer (winget)`r`nNo = open Git for Windows download page`r`nCancel = stop",
+        "Repair winget or install Git",
+        "YesNoCancel",
+        "Warning"
+    )
+
+    if ($choice -eq [Windows.Forms.DialogResult]::Yes) {
+        Open-AppInstallerStorePage
+        throw "Opened Microsoft Store App Installer page. Install or reinstall App Installer, then run preflight again."
+    }
+    if ($choice -eq [Windows.Forms.DialogResult]::No) {
+        Start-Process "https://git-scm.com/download/win"
+        throw "Opened Git for Windows download page. Install Git for Windows, then run this wizard again."
+    }
+
+    throw $WingetState.Message
 }
 
 function Get-GitBashPath {
@@ -138,13 +196,7 @@ function Select-BashForInstall {
     } else {
         $wingetState = Test-WingetAvailable
         if (-not $wingetState.Ok) {
-            [Windows.Forms.MessageBox]::Show(
-                "Git Bash was not found, and JetFUEL cannot install Git automatically because winget is missing or broken.`r`n`r`n$($wingetState.Message)`r`n`r`nInstall Git for Windows manually from https://git-scm.com/download/win, then run this wizard again.",
-                "Git Bash required",
-                "OK",
-                "Warning"
-            ) | Out-Null
-            throw $wingetState.Message
+            Prompt-WingetRepairOrGitManual -WingetState $wingetState
         }
 
         $choice = [Windows.Forms.MessageBox]::Show(
@@ -168,7 +220,7 @@ function Install-GitForWindows {
     & $Log "Git Bash was not found. Trying to install Git for Windows with winget..."
     $wingetState = Test-WingetAvailable
     if (-not $wingetState.Ok) {
-        throw $wingetState.Message
+        Prompt-WingetRepairOrGitManual -WingetState $wingetState
     }
     $winget = $wingetState.Path
     & $Log $wingetState.Message
@@ -1590,7 +1642,7 @@ Settings tab
 
 Troubleshooting
 - If Git Bash is missing, JetFUEL can install Git for Windows only when winget is installed and working.
-- If winget reports that the application cannot be started, repair or reinstall Microsoft App Installer from the Microsoft Store, or install Git for Windows manually.
+- If winget reports that the application cannot be started, choose the App Installer repair option to open the Microsoft Store and install/reinstall App Installer, or choose the Git download option and install Git for Windows manually.
 - If the JetKVM stays in NeedsLogin, use Check Tailscale and look for a login URL in the log.
 - Tailscale auth keys should be full pre-authentication secrets beginning with tskey-auth-. The key ID ending CNTRL is not enough.
 - Tailscale installation may fail if the JetKVM itself is set up/authenticated using Google auth. Use local JetKVM authentication for this SSH/Developer Mode flow.
