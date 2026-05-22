@@ -1,65 +1,106 @@
 # JetFUEL
 
-JetFUEL is a Windows 10/11 setup wizard for installing Tailscale on a JetKVM.
+<p align="center">
+  <img src="assets/icon.png" alt="JetFUEL logo" width="180">
+</p>
 
-It automates the Windows-side pieces:
+JetFUEL is a Windows 10/11 PowerShell setup wizard for installing Tailscale on a JetKVM.
 
-- Checks for Git Bash and installs Git for Windows with `winget` when missing.
-- If Git Bash is missing but WSL bash is present, asks whether to install Git for Windows or use WSL bash for this run.
-- Creates an RSA SSH key pair when needed.
-- Copies the public key so it can be pasted into JetKVM Developer Mode.
-- Shows precheck indicators for Git Bash, local SSH tools, JetKVM ping, JetKVM web UI reachability, and JetKVM SSH login.
-- Uses colour-coded logs: green for success, amber for warnings, red for errors.
-- Downloads the official JetKVM Tailscale installer.
-- Applies the known Git Bash ping compatibility patch.
-- Runs the installer with a pinned Tailscale version, optional auth key, optional hostname, and optional clean install.
+It is designed for non-technical users: the wizard walks through prechecks, SSH key setup, the required JetKVM UI steps, and the Tailscale install flow.
 
-It guides the JetKVM UI pieces that are not exposed as stable public APIs:
+## Quick Start
 
-- Set or change the local JetKVM password.
-- Check/install JetKVM system updates.
-- Enable Developer Mode and save the SSH public key.
+Run from PowerShell:
 
-## Run Locally
+```powershell
+irm https://raw.githubusercontent.com/GoblinRules/JetFUEL/main/Install-JetFuel.ps1 | iex
+```
+
+That bootstrap downloads JetFUEL into:
+
+```text
+%LOCALAPPDATA%\JetFUEL
+```
+
+Then it launches the wizard.
+
+## Run From A Local Clone
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\JetFuel.ps1
 ```
 
+## What It Does
+
+- Checks for Git Bash or WSL bash.
+- Offers to install Git for Windows with `winget` if Git Bash is missing.
+- Checks for Windows SSH tools.
+- Creates an SSH key pair when needed.
+- Copies the public key so it can be pasted into JetKVM Developer Mode.
+- Checks JetKVM network, web UI, and SSH reachability.
+- Guides the required JetKVM UI steps.
+- Runs the JetKVM Tailscale installer.
+- Supports optional Tailscale auth keys.
+- Supports optional Tailscale hostname naming.
+- Supports clean Tailscale installs.
+- Provides Tailscale check, repair, and remove actions.
+- Keeps colour-coded logs and a copy-log button.
+
 ## Wizard Flow
 
 1. Enter the JetKVM IP address or hostname.
-2. Click `Run preflight` in Step 1 and confirm the indicators show the PC has Git Bash, SSH tools, and can reach the JetKVM.
-3. Create or select an SSH key, then click `Copy public key`.
-4. Open the JetKVM UI, set a local password if wanted, install JetKVM updates if offered, and enable Developer Mode with the copied public key.
-5. Choose Tailscale options and click `Step 5 - Run install`.
+2. Click `Run preflight` in Step 1.
+3. Create or select an SSH key.
+4. Click `Copy public key`.
+5. Open the JetKVM UI.
+6. In JetKVM Settings > Advanced, enable Developer Mode and paste the SSH public key.
+7. Save the JetKVM settings.
+8. Choose Tailscale options.
+9. Click `Step 5 - Run install`.
 
-The `SSH tools` precheck means this Windows PC has an SSH client available. The `JetKVM SSH login` precheck only turns green after Developer Mode is enabled on the JetKVM and the selected public key has been saved there.
+After Tailscale is online, you can remove the SSH public key from JetKVM or disable Developer Mode again if you do not need SSH access.
 
-Tailscale auth keys are optional. Enable the auth key checkbox only when you have one from the Tailscale admin console. They usually start with `tskey-auth-`.
+## Installer Script Sources
 
-## IRM / IEX Bootstrap
+Step 3 lets you choose which install script to use:
 
-Once this repository is published, update the URL in `Install-JetFuel.ps1` if needed and run:
+- `Official JetKVM`: downloads JetKVM's current hosted installer script.
+- `JetFUEL repo`: uses the local reference copy stored in this repository.
+- `Custom URL`: downloads a compatible custom script URL configured in Settings.
+- `Local file`: runs a compatible local script configured in Settings.
 
-```powershell
-irm https://raw.githubusercontent.com/Revellio/JetFUEL/main/Install-JetFuel.ps1 | iex
+The default is `Official JetKVM`.
+
+The repository includes a copy of JetKVM's installer script as `install-tailscale.sh`. It is included as a reference/fallback in case JetKVM changes the hosted script later. Because the upstream script does not publish a separate script version, JetFUEL records a fetch timestamp and SHA256 hash in `install-tailscale.metadata.json`.
+
+Custom scripts must keep the same command-line contract:
+
+```text
+[-v|--version <tailscale-version>] [-y|--yes] [-c|--clean] <JetKVM-IP> [-- <tailscale up args...>]
 ```
 
-For a fork or private hosting location:
+They must install/configure Tailscale on the JetKVM, handle reboot/return, and print any Tailscale login URL.
 
-```powershell
-irm https://example.com/Install-JetFuel.ps1 | iex
+## Tailscale Auth Key Notes
+
+Tailscale auth keys are optional.
+
+Use the auth key checkbox only when you have a pre-authentication key from the Tailscale admin console. It should usually start with:
+
+```text
+tskey-auth-
 ```
 
-## Notes
+The key ID shown in the Tailscale admin table, often ending in `CNTRL`, is not enough.
 
-JetKVM's current documentation installs Tailscale by running the official shell script from a local computer:
+## Disclaimer
 
-```sh
-curl -fsSL https://jetkvm.com/install-tailscale.sh | sh -s -- <jetkvm_ip>
-```
+JetFUEL is an unofficial helper tool. It is not made by, endorsed by, or supported by JetKVM or Tailscale.
 
-On Windows, that command needs a Unix-like shell such as WSL or Git Bash. JetFUEL prefers Git Bash because it can be installed with `winget` and works naturally with Windows SSH key paths. If Git Bash is not found but WSL bash is available, the wizard asks which path to use.
+This tool enables Developer Mode SSH on your JetKVM as part of the setup flow. Developer Mode can weaken device security while enabled. Review the steps before running them, and disable Developer Mode or remove the SSH key afterwards if you do not need ongoing SSH access.
 
-The wizard defaults to Tailscale `1.96.4` because JetKVM issue #1461 reported crashes with `1.98.1` and `1.98.2`. A later comment reports `1.98.3` working, but the official JetKVM installer may still block `1.98.x`; change the version only when you have confirmed the current JetKVM installer accepts it.
+Use at your own risk. You are responsible for reviewing scripts before running them, especially when using `irm | iex`, custom installer URLs, or local installer scripts.
+
+## License
+
+This project is licensed under the MIT License. See [LICENSE](LICENSE).
