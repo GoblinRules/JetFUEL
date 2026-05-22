@@ -1547,17 +1547,17 @@ function Start-JetFuelGuiV2 {
 
     $setupLayout = [Windows.Forms.TableLayoutPanel]::new()
     $setupLayout.Dock = "Top"
-    $setupLayout.Height = 872
+    $setupLayout.Height = 802
     $setupLayout.AutoScroll = $false
     $setupLayout.BackColor = $ui.Window
     $setupLayout.ColumnCount = 1
     $setupLayout.RowCount = 5
     $setupLayout.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
-    $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 132)) | Out-Null
-    $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 210)) | Out-Null
-    $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 342)) | Out-Null
-    $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 134)) | Out-Null
-    $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 54)) | Out-Null
+    $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 112)) | Out-Null
+    $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 176)) | Out-Null
+    $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 336)) | Out-Null
+    $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 126)) | Out-Null
+    $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 52)) | Out-Null
     $setupPage.Controls.Add($setupLayout)
 
     $tailscaleLayout = [Windows.Forms.TableLayoutPanel]::new()
@@ -1682,7 +1682,7 @@ Status log
     $precheckGroup = New-Group "Step 1 - Prechecks"
     $preGrid = New-StepGrid 3
     $preGrid.RowStyles.Clear()
-    foreach ($height in @(38, 38, 42)) {
+    foreach ($height in @(28, 28, 28)) {
         $preGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, $height)) | Out-Null
     }
     $precheckGroup.Controls.Add($preGrid)
@@ -1709,7 +1709,7 @@ Status log
     $step2Group = New-Group "Step 2 - JetKVM and SSH"
     $step2Grid = New-StepGrid 4
     $step2Grid.RowStyles.Clear()
-    foreach ($height in @(40, 40, 38, 40)) {
+    foreach ($height in @(34, 34, 32, 34)) {
         $step2Grid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, $height)) | Out-Null
     }
     $step2Group.Controls.Add($step2Grid)
@@ -1756,7 +1756,7 @@ Status log
     $step3Grid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
     $step3Grid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, 10)) | Out-Null
     $step3Grid.RowStyles.Clear()
-    foreach ($height in @(34, 30, 30, 34, 34, 34, 30, 34, 30, 32)) {
+    foreach ($height in @(34, 30, 30, 34, 34, 30, 34, 30, 34, 32)) {
         $step3Grid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, $height)) | Out-Null
     }
     $step3Group.Controls.Add($step3Grid)
@@ -1770,6 +1770,10 @@ Status log
     [void]$installerSourceBox.Items.AddRange(@("Official JetKVM", "JetFUEL repo", "Custom URL", "Local file"))
     $installerSourceBox.SelectedItem = "Official JetKVM"
     $installerSourceHelp = New-RowLabel "Default uses JetKVM's current script. See Settings for the local reference copy and custom source requirements."
+    $cleanCheck = [Windows.Forms.CheckBox]::new()
+    $cleanCheck.Text = "Clean Tailscale install on JetKVM (creates a new Tailscale machine identity)"
+    $cleanCheck.Dock = "Fill"
+    Set-CheckStyle $cleanCheck
     $useAuthKeyCheck = [Windows.Forms.CheckBox]::new()
     $useAuthKeyCheck.Text = "Use a Tailscale auth key to connect automatically"
     $useAuthKeyCheck.Dock = "Fill"
@@ -1782,34 +1786,30 @@ Status log
     $hostHelp = New-RowLabel "Lowercase letters, numbers, and hyphens only. Cannot start or end with a hyphen."
     $versionBox = New-Field "1.96.4"
     $versionNote = New-RowLabel "Default is pinned for JetKVM compatibility. Change only if you know the version works on your device."
-    $cleanCheck = [Windows.Forms.CheckBox]::new()
-    $cleanCheck.Text = "Clean Tailscale install on JetKVM (creates a new Tailscale machine identity)"
-    $cleanCheck.Dock = "Fill"
-    Set-CheckStyle $cleanCheck
     $step3Grid.Controls.Add((New-RowLabel "Install script"), 0, 0)
     $step3Grid.Controls.Add($installerSourceBox, 1, 0)
     $step3Grid.SetColumnSpan($installerSourceBox, 2)
     $step3Grid.Controls.Add($installerSourceHelp, 1, 1)
     $step3Grid.SetColumnSpan($installerSourceHelp, 2)
-    $step3Grid.Controls.Add($useAuthKeyCheck, 1, 2)
-    $step3Grid.SetColumnSpan($useAuthKeyCheck, 2)
-    $step3Grid.Controls.Add((New-RowLabel "Tailscale auth key"), 0, 3)
-    $step3Grid.Controls.Add($authBox, 1, 3)
-    $step3Grid.SetColumnSpan($authBox, 2)
-    $step3Grid.Controls.Add($authHelp, 1, 4)
-    $step3Grid.SetColumnSpan($authHelp, 2)
-    $step3Grid.Controls.Add((New-RowLabel "Tailscale hostname"), 0, 5)
-    $step3Grid.Controls.Add($hostBox, 1, 5)
-    $step3Grid.SetColumnSpan($hostBox, 2)
-    $step3Grid.Controls.Add($hostHelp, 1, 6)
-    $step3Grid.SetColumnSpan($hostHelp, 2)
-    $step3Grid.Controls.Add((New-RowLabel "Tailscale version"), 0, 7)
-    $step3Grid.Controls.Add($versionBox, 1, 7)
-    $step3Grid.SetColumnSpan($versionBox, 2)
-    $step3Grid.Controls.Add($versionNote, 1, 8)
-    $step3Grid.SetColumnSpan($versionNote, 2)
-    $step3Grid.Controls.Add($cleanCheck, 1, 9)
+    $step3Grid.Controls.Add($cleanCheck, 1, 2)
     $step3Grid.SetColumnSpan($cleanCheck, 2)
+    $step3Grid.Controls.Add($useAuthKeyCheck, 1, 3)
+    $step3Grid.SetColumnSpan($useAuthKeyCheck, 2)
+    $step3Grid.Controls.Add((New-RowLabel "Tailscale auth key"), 0, 4)
+    $step3Grid.Controls.Add($authBox, 1, 4)
+    $step3Grid.SetColumnSpan($authBox, 2)
+    $step3Grid.Controls.Add($authHelp, 1, 5)
+    $step3Grid.SetColumnSpan($authHelp, 2)
+    $step3Grid.Controls.Add((New-RowLabel "Tailscale hostname"), 0, 6)
+    $step3Grid.Controls.Add($hostBox, 1, 6)
+    $step3Grid.SetColumnSpan($hostBox, 2)
+    $step3Grid.Controls.Add($hostHelp, 1, 7)
+    $step3Grid.SetColumnSpan($hostHelp, 2)
+    $step3Grid.Controls.Add((New-RowLabel "Tailscale version"), 0, 8)
+    $step3Grid.Controls.Add($versionBox, 1, 8)
+    $step3Grid.SetColumnSpan($versionBox, 2)
+    $step3Grid.Controls.Add($versionNote, 1, 9)
+    $step3Grid.SetColumnSpan($versionNote, 2)
     $setupLayout.Controls.Add($step3Group, 0, 2)
 
     $manualSteps = New-Group "Step 4 - Required JetKVM UI steps"
