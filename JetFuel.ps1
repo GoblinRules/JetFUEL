@@ -1915,7 +1915,7 @@ Status log
     $tailscaleHelp.Dock = "Fill"
     $tailscaleHelp.ForeColor = $ui.Muted
     $tailscaleHelp.Font = [Drawing.Font]::new("Segoe UI", 9)
-    $tailscaleHelp.Text = "Check Tailscale prints status, routes, DNS, version, and running processes from the JetKVM.`r`nRepair Tailscale runs tailscale up again using the current auth-key/hostname fields, or opens a browser login URL when no auth key is used.`r`nRemove Tailscale logs out where possible, stops Tailscale, removes /userdata/tailscale, and reboots the JetKVM."
+    $tailscaleHelp.Text = "Check Tailscale prints status, routes, DNS, version, and running processes from the JetKVM.`r`nRepair Tailscale recreates the boot hook if needed, may reboot JetKVM when the hook has just been repaired, then runs tailscale up using the current auth-key/hostname fields or opens a browser login URL when no auth key is used.`r`nRemove Tailscale logs out where possible, stops Tailscale, removes /userdata/tailscale, and reboots the JetKVM."
     $tailscaleHelpGroup.Controls.Add($tailscaleHelp)
     $tailscaleLayout.Controls.Add($tailscaleHelpGroup, 0, 1)
 
@@ -2288,6 +2288,27 @@ Status log
             $ensurePersistentCmd = "echo '--- ensure tailscale persistence/autostart ---'; if [ -x /userdata/tailscale/tailscale ]; then /userdata/tailscale/tailscale configure jetkvm 2>&1 || true; else echo 'WARN: /userdata/tailscale/tailscale is missing'; fi; if [ -f /userdata/init.d/S22tailscale ]; then chmod +x /userdata/init.d/S22tailscale 2>&1 || true; fi; if ! ps | grep '[t]ailscaled' >/dev/null 2>&1; then echo 'tailscaled is not running; starting it'; if [ -x /userdata/init.d/S22tailscale ]; then /userdata/init.d/S22tailscale start 2>&1 || true; elif [ -x /userdata/tailscale/tailscaled ]; then /userdata/tailscale/tailscaled >/dev/null 2>&1 & else echo 'WARN: cannot start tailscaled because binary is missing'; fi; sleep 2; fi; echo '--- persistence check ---'; if [ -f /userdata/init.d/S22tailscale ] && grep -q '/userdata/tailscale/tailscaled' /userdata/init.d/S22tailscale; then echo '[OK] boot hook exists'; else echo '[FAIL] boot hook missing or incomplete'; fi; ps | grep tailscale | grep -v grep 2>&1 || true"
             $persistentResult = Invoke-JetKvmSshCommand -JetKvmAddress $ip -KeyPath $keyPath -Command $ensurePersistentCmd -TimeoutSeconds 45
             if ($persistentResult.Output) { $persistentResult.Output -split "`n" | ForEach-Object { & $log $_ } }
+            if ($persistentResult.Output -match 'Now restart your JetKVM|restart your JetKVM') {
+                $answer = [Windows.Forms.MessageBox]::Show(
+                    "The JetKVM Tailscale boot hook was repaired, but JetKVM says it must reboot before tailscaled will start.`r`n`r`nReboot the JetKVM now? After it comes back online, click Check Tailscale. If it still shows NeedsLogin, click Repair Tailscale again.",
+                    "JetKVM reboot required",
+                    "YesNo",
+                    "Warning"
+                )
+                if ($answer -eq [Windows.Forms.DialogResult]::Yes) {
+                    & $log "Rebooting JetKVM so the Tailscale boot hook can start tailscaled..."
+                    try {
+                        $null = Invoke-JetKvmSshCommand -JetKvmAddress $ip -KeyPath $keyPath -Command "( sleep 1; reboot ) >/dev/null 2>&1 &" -TimeoutSeconds 5
+                    } catch {
+                        & $log "Reboot command sent; SSH may disconnect while JetKVM restarts."
+                    }
+                    & $setBusy $false "JetKVM rebooting"
+                } else {
+                    & $log "Repair paused. Reboot the JetKVM, then click Check Tailscale."
+                    & $setBusy $false "Reboot required"
+                }
+                return
+            }
 
             $preStatus = Invoke-JetKvmSshCommand -JetKvmAddress $ip -KeyPath $keyPath -Command "tailscale status 2>&1" -TimeoutSeconds 30
             if ($preStatus.Output) { $preStatus.Output -split "`n" | ForEach-Object { & $log $_ } }
