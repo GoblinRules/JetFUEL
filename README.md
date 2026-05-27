@@ -46,6 +46,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\JetFuel.ps1
 - Supports optional Tailscale hostname naming.
 - Supports clean Tailscale installs.
 - Provides Tailscale check, repair, and remove actions.
+- Checks and repairs the JetKVM Tailscale boot hook at `/userdata/init.d/S22tailscale`.
 - Keeps colour-coded logs and a copy-log button.
 
 ## Wizard Flow
@@ -101,6 +102,7 @@ The key ID shown in the Tailscale admin table, often ending in `CNTRL`, is not e
 - If Git Bash is missing, JetFUEL can install Git for Windows only when `winget` is installed and working.
 - If `winget` says the application cannot be started, use the wizard's App Installer repair option to open the Microsoft Store and install/reinstall App Installer, or choose the Git download option and install Git for Windows manually.
 - If the JetKVM stays in `NeedsLogin`, use `Check Tailscale` and look for a login URL in the status log.
+- If Tailscale goes offline after a reboot, use `Check Tailscale` to verify `/userdata/init.d/S22tailscale`, then use `Repair Tailscale` to recreate the boot hook and rerun `tailscale up`.
 - Tailscale auth keys must be full pre-authentication secrets beginning with `tskey-auth-`. The key ID ending in `CNTRL` is not enough.
 - Tailscale installation may fail if the JetKVM itself is set up/authenticated using Google auth. Use local JetKVM authentication for this SSH/Developer Mode flow.
 - If SSH login fails, confirm Developer Mode is enabled, the public key was saved in JetKVM Settings > Advanced, and the selected private key matches the public key.
