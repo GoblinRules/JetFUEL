@@ -7,6 +7,7 @@ $ErrorActionPreference = "Stop"
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
+try { [Windows.Forms.Application]::EnableVisualStyles() } catch {}
 
 function Test-IsAdministrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -1338,44 +1339,48 @@ function Start-JetFuelGuiV2 {
     $form = [Windows.Forms.Form]::new()
     $form.Text = "JetFUEL - JetKVM Tailscale Setup"
     $form.StartPosition = "CenterScreen"
-    $form.Size = [Drawing.Size]::new(1120, 900)
-    $form.MinimumSize = [Drawing.Size]::new(760, 620)
+    $form.Size = [Drawing.Size]::new(1080, 820)
+    $form.MinimumSize = [Drawing.Size]::new(760, 560)
     $form.AutoScaleMode = [Windows.Forms.AutoScaleMode]::None
-    $form.Font = [Drawing.Font]::new("Segoe UI", 9)
+    $form.Font = [Drawing.Font]::new("Segoe UI", 8.5)
     $form.BackColor = $ui.Window
 
     $split = [Windows.Forms.SplitContainer]::new()
     $split.Dock = "Fill"
     $split.Orientation = [Windows.Forms.Orientation]::Horizontal
     $split.SplitterWidth = 7
-    $split.Panel1MinSize = 360
+    $split.Panel1MinSize = 300
     $split.Panel2MinSize = 110
     $split.BackColor = $ui.Border
     $form.Controls.Add($split)
-    $form.Add_Shown({
+    $setInitialSplitterDistance = {
         try {
-            $split.SplitterDistance = [Math]::Max(
-                $split.Panel1MinSize,
-                $split.Height - 180
-            )
+            $maxDistance = $split.Height - $split.Panel2MinSize - $split.SplitterWidth
+            if ($maxDistance -le $split.Panel1MinSize) { return }
+            $targetLogHeight = [Math]::Min(220, [Math]::Max(120, [Math]::Round($split.Height * 0.26)))
+            $targetDistance = $split.Height - $targetLogHeight - $split.SplitterWidth
+            $split.SplitterDistance = [Math]::Min($maxDistance, [Math]::Max($split.Panel1MinSize, $targetDistance))
         } catch {}
+    }
+    $form.Add_Shown({
+        & $setInitialSplitterDistance
     })
 
     $main = [Windows.Forms.TableLayoutPanel]::new()
     $main.Dock = "Fill"
-    $main.Padding = [Windows.Forms.Padding]::new(20)
+    $main.Padding = [Windows.Forms.Padding]::new(12)
     $main.ColumnCount = 1
     $main.RowCount = 2
     $main.AutoScroll = $false
     $main.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
-    $main.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 76)) | Out-Null
+    $main.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 62)) | Out-Null
     $main.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
     $split.Panel1.Controls.Add($main)
 
     $header = [Windows.Forms.Panel]::new()
     $header.Dock = "Fill"
     $header.BackColor = $ui.Surface2
-    $header.Padding = [Windows.Forms.Padding]::new(18, 12, 18, 10)
+    $header.Padding = [Windows.Forms.Padding]::new(14, 8, 14, 8)
     $iconPath = Join-Path $PSScriptRoot "assets\icon.ico"
     $logoPath = Join-Path $PSScriptRoot "assets\icon.png"
     if (Test-Path -LiteralPath $iconPath) {
@@ -1386,8 +1391,8 @@ function Start-JetFuelGuiV2 {
     if (Test-Path -LiteralPath $logoPath) {
         try {
             $logo = [Windows.Forms.PictureBox]::new()
-            $logo.Size = [Drawing.Size]::new(42, 42)
-            $logo.Location = [Drawing.Point]::new(18, 16)
+            $logo.Size = [Drawing.Size]::new(38, 38)
+            $logo.Location = [Drawing.Point]::new(14, 12)
             $logo.SizeMode = [Windows.Forms.PictureBoxSizeMode]::Zoom
             $logo.Image = [Drawing.Image]::FromFile($logoPath)
             $header.Controls.Add($logo)
@@ -1395,15 +1400,15 @@ function Start-JetFuelGuiV2 {
     }
     $title = [Windows.Forms.Label]::new()
     $title.Text = "JetKVM Tailscale setup"
-    $title.Font = [Drawing.Font]::new("Segoe UI", 16, [Drawing.FontStyle]::Bold)
+    $title.Font = [Drawing.Font]::new("Segoe UI", 14, [Drawing.FontStyle]::Bold)
     $title.ForeColor = $ui.Text
     $title.AutoSize = $true
-    $title.Location = [Drawing.Point]::new(72, 10)
+    $title.Location = [Drawing.Point]::new(62, 9)
     $subtitle = [Windows.Forms.Label]::new()
     $subtitle.Text = "Follow the steps from top to bottom. Run preflight first to confirm this PC can see the JetKVM."
     $subtitle.AutoSize = $true
     $subtitle.ForeColor = $ui.Muted
-    $subtitle.Location = [Drawing.Point]::new(74, 43)
+    $subtitle.Location = [Drawing.Point]::new(64, 36)
     $header.Controls.AddRange(@($title, $subtitle))
     $main.Controls.Add($header, 0, 0)
 
@@ -1414,8 +1419,8 @@ function Start-JetFuelGuiV2 {
         $group.BackColor = $ui.Surface
         $group.ForeColor = $ui.Text
         $group.Font = [Drawing.Font]::new("Segoe UI", 9, [Drawing.FontStyle]::Bold)
-        $group.Padding = [Windows.Forms.Padding]::new(12, 10, 12, 12)
-        $group.Margin = [Windows.Forms.Padding]::new(0, 8, 0, 0)
+        $group.Padding = [Windows.Forms.Padding]::new(10, 8, 10, 8)
+        $group.Margin = [Windows.Forms.Padding]::new(0, 5, 0, 0)
         return $group
     }
 
@@ -1424,12 +1429,12 @@ function Start-JetFuelGuiV2 {
         $grid.Dock = "Fill"
         $grid.ColumnCount = 3
         $grid.RowCount = $Rows
-        $grid.Padding = [Windows.Forms.Padding]::new(4, 12, 4, 4)
-        $grid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, 175)) | Out-Null
+        $grid.Padding = [Windows.Forms.Padding]::new(4, 9, 4, 3)
+        $grid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, 165)) | Out-Null
         $grid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
-        $grid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, 140)) | Out-Null
+        $grid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, 132)) | Out-Null
         for ($i = 0; $i -lt $Rows; $i++) {
-            $grid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 40)) | Out-Null
+            $grid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 32)) | Out-Null
         }
         return $grid
     }
@@ -1438,7 +1443,7 @@ function Start-JetFuelGuiV2 {
         $box = [Windows.Forms.TextBox]::new()
         $box.Text = $Text
         $box.Dock = "Fill"
-        $box.Margin = [Windows.Forms.Padding]::new(0, 3, 10, 3)
+        $box.Margin = [Windows.Forms.Padding]::new(0, 2, 8, 2)
         $box.BorderStyle = "FixedSingle"
         $box.BackColor = $ui.Input
         $box.ForeColor = $ui.InputText
@@ -1452,7 +1457,7 @@ function Start-JetFuelGuiV2 {
         $label.Text = $Text
         $label.Dock = "Fill"
         $label.TextAlign = "MiddleLeft"
-        $label.Margin = [Windows.Forms.Padding]::new(0, 0, 10, 0)
+        $label.Margin = [Windows.Forms.Padding]::new(0, 0, 8, 0)
         $label.ForeColor = $ui.Text
         $label.Font = [Drawing.Font]::new("Segoe UI", 9)
         return $label
@@ -1479,17 +1484,17 @@ function Start-JetFuelGuiV2 {
         $CheckBox.ForeColor = $ui.Text
         $CheckBox.Font = [Drawing.Font]::new("Segoe UI", 9)
         $CheckBox.BackColor = $ui.Surface
-        $CheckBox.Margin = [Windows.Forms.Padding]::new(0, 3, 10, 5)
+        $CheckBox.Margin = [Windows.Forms.Padding]::new(0, 1, 8, 1)
     }
 
     $pageShell = [Windows.Forms.TableLayoutPanel]::new()
     $pageShell.Dock = "Fill"
     $pageShell.BackColor = $ui.Window
-    $pageShell.Margin = [Windows.Forms.Padding]::new(0, 10, 0, 10)
+    $pageShell.Margin = [Windows.Forms.Padding]::new(0, 7, 0, 7)
     $pageShell.ColumnCount = 1
     $pageShell.RowCount = 2
     $pageShell.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
-    $pageShell.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 38)) | Out-Null
+    $pageShell.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 34)) | Out-Null
     $pageShell.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
 
     $navPanel = [Windows.Forms.TableLayoutPanel]::new()
@@ -1497,7 +1502,7 @@ function Start-JetFuelGuiV2 {
     $navPanel.BackColor = $ui.Window
     $navPanel.ColumnCount = 5
     $navPanel.RowCount = 1
-    foreach ($width in @(132, 132, 132, 132)) {
+    foreach ($width in @(122, 122, 122, 122)) {
         $navPanel.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, $width)) | Out-Null
     }
     $navPanel.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
@@ -1547,17 +1552,19 @@ function Start-JetFuelGuiV2 {
 
     $setupLayout = [Windows.Forms.TableLayoutPanel]::new()
     $setupLayout.Dock = "Top"
-    $setupLayout.Height = 802
+    $setupLayout.AutoSize = $true
+    $setupLayout.AutoSizeMode = [Windows.Forms.AutoSizeMode]::GrowAndShrink
+    $setupLayout.MinimumSize = [Drawing.Size]::new(0, 680)
     $setupLayout.AutoScroll = $false
     $setupLayout.BackColor = $ui.Window
     $setupLayout.ColumnCount = 1
     $setupLayout.RowCount = 5
     $setupLayout.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
-    $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 112)) | Out-Null
-    $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 176)) | Out-Null
-    $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 336)) | Out-Null
-    $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 126)) | Out-Null
-    $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 52)) | Out-Null
+    $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 100)) | Out-Null
+    $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 148)) | Out-Null
+    $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 286)) | Out-Null
+    $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 100)) | Out-Null
+    $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 46)) | Out-Null
     $setupPage.Controls.Add($setupLayout)
 
     $tailscaleLayout = [Windows.Forms.TableLayoutPanel]::new()
@@ -1566,7 +1573,7 @@ function Start-JetFuelGuiV2 {
     $tailscaleLayout.ColumnCount = 1
     $tailscaleLayout.RowCount = 2
     $tailscaleLayout.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
-    $tailscaleLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 118)) | Out-Null
+    $tailscaleLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 76)) | Out-Null
     $tailscaleLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
     $tailscalePage.Controls.Add($tailscaleLayout)
 
@@ -1683,7 +1690,7 @@ Status log
     $precheckGroup = New-Group "Step 1 - Prechecks"
     $preGrid = New-StepGrid 3
     $preGrid.RowStyles.Clear()
-    foreach ($height in @(28, 28, 28)) {
+    foreach ($height in @(25, 25, 25)) {
         $preGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, $height)) | Out-Null
     }
     $precheckGroup.Controls.Add($preGrid)
@@ -1696,7 +1703,7 @@ Status log
     $preflightButton = [Windows.Forms.Button]::new()
     $preflightButton.Text = "Run preflight"
     $preflightButton.Dock = "Fill"
-    $preflightButton.Margin = [Windows.Forms.Padding]::new(8, 2, 8, 2)
+    $preflightButton.Margin = [Windows.Forms.Padding]::new(8, 3, 8, 3)
     Set-ButtonStyle $preflightButton "Secondary"
     $preGrid.Controls.Add($bashStatus, 0, 0)
     $preGrid.Controls.Add($kvmStatus, 1, 0)
@@ -1705,12 +1712,13 @@ Status log
     $preGrid.Controls.Add($wingetStatus, 0, 2)
     $preGrid.Controls.Add($sshLoginStatus, 1, 2)
     $preGrid.Controls.Add($preflightButton, 2, 0)
+    $preGrid.SetRowSpan($preflightButton, 2)
     $setupLayout.Controls.Add($precheckGroup, 0, 0)
 
     $step2Group = New-Group "Step 2 - JetKVM and SSH"
     $step2Grid = New-StepGrid 4
     $step2Grid.RowStyles.Clear()
-    foreach ($height in @(34, 34, 32, 34)) {
+    foreach ($height in @(30, 30, 28, 30)) {
         $step2Grid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, $height)) | Out-Null
     }
     $step2Group.Controls.Add($step2Grid)
@@ -1753,18 +1761,18 @@ Status log
     $step3Grid = New-StepGrid 10
     $step3Grid.Dock = "Fill"
     $step3Grid.ColumnStyles.Clear()
-    $step3Grid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, 155)) | Out-Null
+    $step3Grid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, 145)) | Out-Null
     $step3Grid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
-    $step3Grid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, 10)) | Out-Null
+    $step3Grid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, 4)) | Out-Null
     $step3Grid.RowStyles.Clear()
-    foreach ($height in @(34, 30, 30, 34, 34, 30, 34, 30, 34, 32)) {
+    foreach ($height in @(30, 24, 26, 26, 30, 30, 30, 24, 30, 26)) {
         $step3Grid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, $height)) | Out-Null
     }
     $step3Group.Controls.Add($step3Grid)
     $installerSourceBox = [Windows.Forms.ComboBox]::new()
     $installerSourceBox.Dock = "Fill"
     $installerSourceBox.DropDownStyle = [Windows.Forms.ComboBoxStyle]::DropDownList
-    $installerSourceBox.Margin = [Windows.Forms.Padding]::new(0, 3, 10, 3)
+    $installerSourceBox.Margin = [Windows.Forms.Padding]::new(0, 2, 8, 2)
     $installerSourceBox.BackColor = $ui.Input
     $installerSourceBox.ForeColor = $ui.InputText
     $installerSourceBox.Font = [Drawing.Font]::new("Segoe UI", 9)
@@ -1818,9 +1826,9 @@ Status log
     $manualSteps.ForeColor = [Drawing.Color]::FromArgb(253, 230, 138)
     $manualGrid = New-StepGrid 3
     $manualGrid.RowStyles.Clear()
-    $manualGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 54)) | Out-Null
-    $manualGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 34)) | Out-Null
-    $manualGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
+    $manualGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 40)) | Out-Null
+    $manualGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 28)) | Out-Null
+    $manualGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, 24)) | Out-Null
     $manualSteps.Controls.Add($manualGrid)
     $stepsText = [Windows.Forms.Label]::new()
     $stepsText.Text = "Important: Step 5 needs Developer Mode SSH enabled on the JetKVM.`r`n1. Open the JetKVM UI and install any system updates.  2. Settings > Advanced: enable Developer Mode, paste the public SSH key, then save."
@@ -1835,12 +1843,12 @@ Status log
     $copyKeyButton = [Windows.Forms.Button]::new()
     $copyKeyButton.Text = "Copy public key"
     $copyKeyButton.Dock = "Fill"
-    $copyKeyButton.Margin = [Windows.Forms.Padding]::new(8, 2, 8, 4)
+    $copyKeyButton.Margin = [Windows.Forms.Padding]::new(8, 1, 8, 2)
     Set-ButtonStyle $copyKeyButton "Secondary"
     $openUiButton2 = [Windows.Forms.Button]::new()
     $openUiButton2.Text = "Open JetKVM UI"
     $openUiButton2.Dock = "Fill"
-    $openUiButton2.Margin = [Windows.Forms.Padding]::new(8, 2, 8, 4)
+    $openUiButton2.Margin = [Windows.Forms.Padding]::new(8, 1, 8, 2)
     Set-ButtonStyle $openUiButton2 "Secondary"
     $manualGrid.Controls.Add($stepsText, 0, 0)
     $manualGrid.SetColumnSpan($stepsText, 2)
@@ -1863,11 +1871,11 @@ Status log
     $setupActionPanel.BackColor = $ui.Window
     $setupActionPanel.ColumnCount = 2
     $setupActionPanel.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
-    $setupActionPanel.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, 190)) | Out-Null
+    $setupActionPanel.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, 184)) | Out-Null
     $runButton = [Windows.Forms.Button]::new()
     $runButton.Text = "Step 5 - Run install"
     $runButton.Dock = "Fill"
-    $runButton.Margin = [Windows.Forms.Padding]::new(8, 6, 0, 6)
+    $runButton.Margin = [Windows.Forms.Padding]::new(8, 4, 0, 4)
     Set-ButtonStyle $runButton "Primary"
     $setupActionPanel.Controls.Add($statusLabel, 0, 0)
     $setupActionPanel.Controls.Add($runButton, 1, 0)
@@ -1875,12 +1883,12 @@ Status log
 
     $actionPanel = [Windows.Forms.TableLayoutPanel]::new()
     $actionPanel.Dock = "Top"
-    $actionPanel.Height = 72
+    $actionPanel.Height = 58
     $actionPanel.BackColor = $ui.Surface
     $actionPanel.ColumnCount = 4
-    $actionPanel.Padding = [Windows.Forms.Padding]::new(12)
+    $actionPanel.Padding = [Windows.Forms.Padding]::new(10)
     $actionPanel.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
-    foreach ($width in @(170, 170, 170)) {
+    foreach ($width in @(150, 150, 150)) {
         $actionPanel.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, $width)) | Out-Null
     }
     $tailscaleText = [Windows.Forms.Label]::new()
@@ -1892,17 +1900,17 @@ Status log
     $checkTailscaleButton = [Windows.Forms.Button]::new()
     $checkTailscaleButton.Text = "Check Tailscale"
     $checkTailscaleButton.Dock = "Fill"
-    $checkTailscaleButton.Margin = [Windows.Forms.Padding]::new(8, 6, 0, 6)
+    $checkTailscaleButton.Margin = [Windows.Forms.Padding]::new(8, 3, 0, 3)
     Set-ButtonStyle $checkTailscaleButton "Secondary"
     $repairTailscaleButton = [Windows.Forms.Button]::new()
     $repairTailscaleButton.Text = "Repair Tailscale"
     $repairTailscaleButton.Dock = "Fill"
-    $repairTailscaleButton.Margin = [Windows.Forms.Padding]::new(8, 6, 0, 6)
+    $repairTailscaleButton.Margin = [Windows.Forms.Padding]::new(8, 3, 0, 3)
     Set-ButtonStyle $repairTailscaleButton "Secondary"
     $removeTailscaleButton = [Windows.Forms.Button]::new()
     $removeTailscaleButton.Text = "Remove Tailscale"
     $removeTailscaleButton.Dock = "Fill"
-    $removeTailscaleButton.Margin = [Windows.Forms.Padding]::new(8, 6, 0, 6)
+    $removeTailscaleButton.Margin = [Windows.Forms.Padding]::new(8, 3, 0, 3)
     Set-ButtonStyle $removeTailscaleButton "Secondary"
     $actionPanel.Controls.Add($tailscaleText, 0, 0)
     $actionPanel.Controls.Add($checkTailscaleButton, 1, 0)
@@ -1979,11 +1987,12 @@ Status log
     $copyLogsButton = [Windows.Forms.Button]::new()
     $copyLogsButton.Text = "Copy logs"
     $copyLogsButton.Dock = "Fill"
-    $copyLogsButton.Margin = [Windows.Forms.Padding]::new(8, 0, 0, 3)
+    $copyLogsButton.Margin = [Windows.Forms.Padding]::new(8, 0, 0, 2)
     Set-ButtonStyle $copyLogsButton "Secondary"
     $logBox = [Windows.Forms.RichTextBox]::new()
     $logBox.Dock = "Fill"
     $logBox.ScrollBars = "Vertical"
+    $logBox.WordWrap = $false
     $logBox.ReadOnly = $true
     $logBox.BorderStyle = "FixedSingle"
     $logBox.BackColor = $ui.Log
