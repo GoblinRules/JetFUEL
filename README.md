@@ -49,6 +49,12 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\JetFuel.ps1
 - Checks and repairs the JetKVM Tailscale boot hook at `/userdata/init.d/S22tailscale`.
 - Keeps colour-coded logs and a copy-log button.
 
+## Planned EDID Selector
+
+JetFUEL is tracking EDID selector support for future deployment UI work. The plan covers JetKVM presets, common monitor presets, Windows monitor EDID capture, custom EDID validation, and possible JetKVM `setEDID` integration.
+
+See [docs/edid-selector-plan.md](docs/edid-selector-plan.md).
+
 ## Wizard Flow
 
 1. Enter the JetKVM IP address or hostname.
