@@ -1476,7 +1476,9 @@ function Start-JetFuelGuiV2 {
 
     function New-StepGrid([int]$Rows) {
         $grid = [Windows.Forms.TableLayoutPanel]::new()
-        $grid.Dock = "Fill"
+        $grid.Dock = "Top"
+        $grid.AutoSize = $true
+        $grid.AutoSizeMode = [Windows.Forms.AutoSizeMode]::GrowAndShrink
         $grid.ColumnCount = 3
         $grid.RowCount = $Rows
         $grid.Padding = New-ScaledPadding 4 9 4 3
@@ -1604,16 +1606,26 @@ function Start-JetFuelGuiV2 {
     $setupLayout.Dock = "Top"
     $setupLayout.AutoSize = $true
     $setupLayout.AutoSizeMode = [Windows.Forms.AutoSizeMode]::GrowAndShrink
-    $setupLayout.MinimumSize = [Drawing.Size]::new(0, (S 680))
     $setupLayout.AutoScroll = $false
     $setupLayout.BackColor = $ui.Window
     $setupLayout.ColumnCount = 1
     $setupLayout.RowCount = 5
     $setupLayout.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
-    foreach ($height in @(100, 148, 286, 100, 46)) {
-        $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, (S $height))) | Out-Null
+    # The step groups size themselves to their content; only the action row is fixed.
+    for ($i = 0; $i -lt 4; $i++) {
+        $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::AutoSize)) | Out-Null
     }
+    $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, (S 46))) | Out-Null
     $setupPage.Controls.Add($setupLayout)
+
+    # Groups in the setup column grow to fit their grids instead of using fixed
+    # heights, so rows are never clipped when fonts or DPI change.
+    $makeGroupAutoHeight = {
+        param([Windows.Forms.GroupBox]$Group)
+        $Group.Dock = "Top"
+        $Group.AutoSize = $true
+        $Group.AutoSizeMode = [Windows.Forms.AutoSizeMode]::GrowAndShrink
+    }
 
     $tailscaleLayout = [Windows.Forms.TableLayoutPanel]::new()
     $tailscaleLayout.Dock = "Fill"
@@ -1736,6 +1748,7 @@ Status log
     & $showPage "Setup"
 
     $precheckGroup = New-Group "Step 1 - Prechecks"
+    & $makeGroupAutoHeight $precheckGroup
     $preGrid = New-StepGrid 3
     $preGrid.RowStyles.Clear()
     foreach ($height in @(25, 25, 25)) {
@@ -1764,6 +1777,7 @@ Status log
     $setupLayout.Controls.Add($precheckGroup, 0, 0)
 
     $step2Group = New-Group "Step 2 - JetKVM and SSH"
+    & $makeGroupAutoHeight $step2Group
     $step2Grid = New-StepGrid 4
     $step2Grid.RowStyles.Clear()
     foreach ($height in @(30, 30, 28, 30)) {
@@ -1806,8 +1820,8 @@ Status log
     $setupLayout.Controls.Add($step2Group, 0, 1)
 
     $step3Group = New-Group "Step 3 - Tailscale options"
+    & $makeGroupAutoHeight $step3Group
     $step3Grid = New-StepGrid 10
-    $step3Grid.Dock = "Fill"
     $step3Grid.ColumnStyles.Clear()
     $step3Grid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, (S 145))) | Out-Null
     $step3Grid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
@@ -1870,6 +1884,7 @@ Status log
     $setupLayout.Controls.Add($step3Group, 0, 2)
 
     $manualSteps = New-Group "Step 4 - Required JetKVM UI steps"
+    & $makeGroupAutoHeight $manualSteps
     $manualSteps.BackColor = [Drawing.Color]::FromArgb(69, 46, 16)
     $manualSteps.ForeColor = [Drawing.Color]::FromArgb(253, 230, 138)
     $manualGrid = New-StepGrid 3
