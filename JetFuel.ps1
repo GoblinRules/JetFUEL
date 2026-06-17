@@ -841,7 +841,20 @@ function Get-LocalUsbInputDevices {
     $devices = New-Object System.Collections.Generic.List[object]
     $seen = @{}
     try {
-        $items = Get-CimInstance Win32_PnPEntity -ErrorAction SilentlyContinue |
+        $allItems = @(Get-CimInstance Win32_PnPEntity -ErrorAction SilentlyContinue)
+        $serialByVidPid = @{}
+        foreach ($usbItem in $allItems) {
+            if ($usbItem.PNPDeviceID -match '^USB\\VID_([0-9A-Fa-f]{4})&PID_([0-9A-Fa-f]{4})\\(.+)$') {
+                $key = ("0x{0}|0x{1}" -f $Matches[1].ToLowerInvariant(), $Matches[2].ToLowerInvariant())
+                if (-not $serialByVidPid.ContainsKey($key)) {
+                    $candidate = ([string]$Matches[3] -replace '[\x00-\x1F\x7F]', '').Trim()
+                    if ($candidate.Length -gt 64) { $candidate = $candidate.Substring(0, 64) }
+                    if (-not [string]::IsNullOrWhiteSpace($candidate)) { $serialByVidPid[$key] = $candidate }
+                }
+            }
+        }
+
+        $items = $allItems |
             Where-Object {
                 $_.PNPDeviceID -match 'VID_([0-9A-Fa-f]{4})&PID_([0-9A-Fa-f]{4})' -and
                 ($_.PNPClass -in @("Keyboard", "Mouse", "HIDClass"))
@@ -854,10 +867,19 @@ function Get-LocalUsbInputDevices {
                 $class = if ([string]::IsNullOrWhiteSpace($item.PNPClass)) { "HIDClass" } else { [string]$item.PNPClass }
                 $vendorId = "0x" + $match.Groups[1].Value.ToLowerInvariant()
                 $productId = "0x" + $match.Groups[2].Value.ToLowerInvariant()
-                $dedupeKey = ("{0}|{1}|{2}|{3}|{4}" -f $vendorId, $productId, $class, $manufacturer, $name).ToUpperInvariant()
+                $serial = ""
+                $serialKey = "$vendorId|$productId"
+                if ($serialByVidPid.ContainsKey($serialKey)) {
+                    $serial = [string]$serialByVidPid[$serialKey]
+                } elseif ($item.PNPDeviceID -match '\\([^\\]+)$') {
+                    $serial = ([string]$Matches[1] -replace '[\x00-\x1F\x7F]', '').Trim()
+                    if ($serial.Length -gt 64) { $serial = $serial.Substring(0, 64) }
+                }
+                $dedupeKey = ("{0}|{1}|{2}|{3}|{4}|{5}" -f $vendorId, $productId, $class, $manufacturer, $name, $serial).ToUpperInvariant()
                 if ($seen.ContainsKey($dedupeKey)) { continue }
                 $seen[$dedupeKey] = $true
                 $displayName = "{0}:{1} [{2}] {3} - {4}" -f $vendorId, $productId, $class, $manufacturer, $name
+                if (-not [string]::IsNullOrWhiteSpace($serial)) { $displayName += " (serial $serial)" }
                 $devices.Add([pscustomobject]@{
                     DisplayName = $displayName
                     Name = $name
@@ -865,12 +887,20 @@ function Get-LocalUsbInputDevices {
                     Class = $class
                     VendorId = $vendorId
                     ProductId = $productId
+                    SerialNumber = $serial
                     PnpDeviceId = $item.PNPDeviceID
                 })
             }
         }
     } catch {}
     return $devices
+}
+
+function New-JetKvmUsbSerialNumber {
+    $hexLength = Get-Random -Minimum 7 -Maximum 8
+    $chars = "0123456789abcdef"
+    $hex = -join (1..$hexLength | ForEach-Object { $chars[(Get-Random -Minimum 0 -Maximum $chars.Length)] })
+    return "{0}&{1}&0&1" -f (Get-Random -Minimum 1 -Maximum 10), $hex
 }
 
 function Get-JetKvmEdidPresets {
@@ -940,7 +970,7 @@ function Get-JetKvmUsbIdentityPresets {
             Class = "JetKVM preset"
             VendorId = "0x046d"
             ProductId = "0xc52b"
-            SerialNumber = ""
+            SerialNumber = New-JetKvmUsbSerialNumber
             Source = "JetKVM preset"
             IsPreset = $true
         },
@@ -951,7 +981,7 @@ function Get-JetKvmUsbIdentityPresets {
             Class = "JetKVM preset"
             VendorId = "0x045e"
             ProductId = "0x005f"
-            SerialNumber = ""
+            SerialNumber = New-JetKvmUsbSerialNumber
             Source = "JetKVM preset"
             IsPreset = $true
         },
@@ -962,7 +992,7 @@ function Get-JetKvmUsbIdentityPresets {
             Class = "JetKVM preset"
             VendorId = "0x413c"
             ProductId = "0x2011"
-            SerialNumber = ""
+            SerialNumber = New-JetKvmUsbSerialNumber
             Source = "JetKVM preset"
             IsPreset = $true
         }
@@ -1205,6 +1235,30 @@ function Assert-JetKvmDomain {
     }
 }
 
+function Set-JetKvmRuntimeHostname {
+    param(
+        [Parameter(Mandatory)][string]$JetKvmAddress,
+        [Parameter(Mandatory)][string]$KeyPath,
+        [Parameter(Mandatory)][string]$Hostname,
+        [AllowEmptyString()][string]$Domain,
+        [scriptblock]$Log
+    )
+
+    $hostsLine = $Hostname
+    if (-not [string]::IsNullOrWhiteSpace($Domain) -and $Domain -ne "dhcp") {
+        $hostsLine = "$Hostname.$Domain $Hostname"
+    }
+
+    $quotedHostname = ConvertTo-ShellSingleQuoted $Hostname
+    $quotedHostsLine = ConvertTo-ShellSingleQuoted $hostsLine
+    $cmd = "printf '%s\n' $quotedHostname > /etc/hostname && { grep -v '^127[.]0[.]1[.]1[[:space:]]' /etc/hosts 2>/dev/null; printf '127.0.1.1\t%s\n' $quotedHostsLine; } > /tmp/jetfuel-hosts && cat /tmp/jetfuel-hosts > /etc/hosts && rm -f /tmp/jetfuel-hosts && hostname -F /etc/hostname && echo '[OK] runtime hostname set:' && hostname"
+    $result = Invoke-JetKvmSshCommand -JetKvmAddress $JetKvmAddress -KeyPath $KeyPath -Command $cmd -TimeoutSeconds 20
+    if ($result.ExitCode -ne 0) {
+        throw "Could not update JetKVM runtime hostname. Exit code $($result.ExitCode). $($result.Output)"
+    }
+    if ($Log) { & $Log $result.Output }
+}
+
 function Update-JetKvmDeviceSettings {
     param(
         [Parameter(Mandatory)][string]$JetKvmAddress,
@@ -1244,6 +1298,10 @@ function Update-JetKvmDeviceSettings {
     Set-JsonObjectProperty -Object $network -Name "ipv6_mode" -Value $IPv6Mode
 
     Save-JetKvmConfigObject -JetKvmAddress $JetKvmAddress -KeyPath $KeyPath -Config $config -Log $Log
+
+    if ($SetNetworkHostname) {
+        Set-JetKvmRuntimeHostname -JetKvmAddress $JetKvmAddress -KeyPath $KeyPath -Hostname $NetworkHostname -Domain $Domain -Log $Log
+    }
 }
 
 function ConvertTo-JetKvmUsbConfig {
@@ -2401,6 +2459,7 @@ Settings tab
   [-v|--version <tailscale-version>] [-y|--yes] [-c|--clean] <JetKVM-IP> [-- <tailscale up args...>]
 - Custom scripts must install/configure Tailscale on the JetKVM, handle reboot/return, and print any Tailscale login URL.
 - JetKVM device settings can apply config-backed defaults: auto update, keyboard layout, display brightness/timers, HDMI sleep, network hostname/domain, mDNS, and IPv6 mode.
+- When a network hostname is enabled, JetFUEL also writes /etc/hostname and /etc/hosts immediately. Reboot the JetKVM after applying so DHCP startup uses the new name; a simple DHCP renew can keep the old lease hostname on udhcpc.
 - The local password is not written by this wizard yet. Set or change it in JetKVM Settings > Access.
 - Hide Header and Hide Status Bar are browser UI preferences in the JetKVM web app, not JetKVM device config values, so JetFUEL does not push them over SSH.
 
@@ -2989,7 +3048,7 @@ Status log
     ) "disabled"
 
     $deviceSettingsNote = [Windows.Forms.Label]::new()
-    $deviceSettingsNote.Text = "Notes: local password should still be set in JetKVM Access UI for now. Hide Header/Status Bar are browser UI preferences, not JetKVM device config values. Static IPv6 is intentionally left to the JetKVM UI because it needs address/gateway/DNS fields."
+    $deviceSettingsNote.Text = "Notes: hostname also updates /etc/hostname immediately, but reboot is still recommended before checking DHCP lease names. Local password should still be set in JetKVM Access UI. Hide Header/Status Bar are browser UI preferences, not device config."
     $deviceSettingsNote.Dock = "Fill"
     $deviceSettingsNote.ForeColor = $ui.Warn
     $deviceSettingsNote.Font = [Drawing.Font]::new("Segoe UI", 9)
@@ -3644,7 +3703,7 @@ echo '--- mac identity complete ---'
             $keyPath = $keyBox.Text.Trim()
             Assert-ValidIpOrHost -Value $ip
             Update-JetKvmConfigProperty -JetKvmAddress $ip -KeyPath $keyPath -Name "usb_config" -Value $usbConfig -Log $log
-            & $log ("USB identity saved to JetKVM config: {0}:{1} {2} - {3}" -f $usbConfig.vendor_id, $usbConfig.product_id, $usbConfig.manufacturer, $usbConfig.product)
+            & $log ("USB identity saved to JetKVM config: {0}:{1} {2} - {3}; serial: {4}" -f $usbConfig.vendor_id, $usbConfig.product_id, $usbConfig.manufacturer, $usbConfig.product, $(if ([string]::IsNullOrWhiteSpace($usbConfig.serial_number)) { "(blank)" } else { $usbConfig.serial_number }))
             & $rebootJetKvmAfterIdentity $ip $keyPath "USB identity"
         } catch {
             & $log ("ERROR: " + $_.Exception.Message)

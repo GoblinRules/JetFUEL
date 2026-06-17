@@ -52,6 +52,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\JetFuel.ps1
 - Loads JetKVM's default EDID/USB identity presets, scans the Windows PC for monitor EDID and USB keyboard/mouse VID/PID candidates, then lets you choose human-readable display and USB identity candidates.
 - Applies selected EDID and USB identity values to JetKVM by backing up and updating `/userdata/kvm_config.json` over SSH, then offering to reboot JetKVM so the values load.
 - Applies optional JetKVM device defaults for auto update, keyboard layout, display brightness/timers, HDMI sleep, network hostname/domain, mDNS, and IPv6 mode.
+- When a network hostname is enabled, writes JetKVM's runtime `/etc/hostname` and `/etc/hosts` as well as config, then offers a reboot so DHCP startup can use the new name.
 
 ## EDID And USB Identity
 
@@ -59,7 +60,7 @@ JetFUEL can scan the Windows machine running the wizard for monitor EDID records
 
 On the Identity tab:
 
-- `Scan PC` loads JetKVM's built-in EDID/USB presets, then reads local monitor EDID and USB input candidates.
+- `Scan PC` loads JetKVM's built-in EDID/USB presets, then reads local monitor EDID and USB input candidates. USB candidates include a Windows serial or instance value when Windows exposes one.
 - `Apply EDID` writes the selected EDID hex content to JetKVM's `hdmi_edid_string` config value. This is the same content JetKVM's web UI labels as `EDID File`.
 - `Apply USB` writes the selected VID/PID/manufacturer/product to JetKVM's `usb_config` value.
 
@@ -118,6 +119,8 @@ Current settings include:
 - Keyboard: English (UK) or English (US) keyboard layout.
 - Hardware: display brightness, dim timer, off timer, and HDMI sleep mode.
 - Network: optional hostname, domain mode, mDNS mode, and IPv6 mode.
+
+Hostname changes are written to `/userdata/kvm_config.json`, `/etc/hostname`, and `/etc/hosts`. Reboot the JetKVM after applying if you need the DHCP lease name to change; with `udhcpc`, a simple lease renew can keep the old lease hostname until startup uses the new hostname.
 
 JetFUEL does not currently set the local JetKVM password. Use JetKVM Settings > Access for that flow. JetKVM's Hide Header and Hide Status Bar options are browser UI preferences, not device config values, so JetFUEL does not push them globally over SSH.
 
