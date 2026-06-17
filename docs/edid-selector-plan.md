@@ -76,21 +76,18 @@ Before applying an EDID:
 
 ## Apply path
 
-Preferred path:
+Current JetFUEL path:
 
 1. Read the selected EDID.
 2. Validate it locally.
-3. Apply it to JetKVM using `setEDID`.
-4. Read back using `getEDID`.
-5. Log the selected label and validation result.
+3. Back up `/userdata/kvm_config.json`.
+4. Write the EDID to `hdmi_edid_string` over SSH.
+5. Offer to reboot JetKVM so the KVM service reloads it.
+6. Log the selected label and validation result.
 
-Fallback path:
+Possible future RPC path:
 
-1. Copy the validated EDID to clipboard.
-2. Open the JetKVM WebUI EDID settings.
-3. Instruct the user to paste and save.
-
-The JSON-RPC path needs implementation validation because JetKVM appears to use the WebRTC/RPC channel from the WebUI rather than a simple unauthenticated HTTP endpoint.
+JetKVM's app supports `setEDID` and `getEDID`, but the JSON-RPC path appears to use the WebRTC/RPC channel from the WebUI rather than a simple unauthenticated HTTP endpoint. Revisit this only if there is a reliable local RPC transport for the wizard.
 
 ## Open decisions
 

@@ -49,11 +49,22 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\JetFuel.ps1
 - Checks and repairs the JetKVM Tailscale boot hook at `/userdata/init.d/S22tailscale`.
 - Keeps colour-coded logs and a copy-log button.
 - Provides an Identity tab for JetKVM MAC status, generated local-administered MAC profiles, custom MAC override, and clearing the user override.
-- Scans the Windows PC for monitor EDID and USB keyboard/mouse VID/PID candidates, then lets you choose the human-readable display and USB identity candidate to use later.
+- Scans the Windows PC for monitor EDID and USB keyboard/mouse VID/PID candidates, then lets you choose human-readable display and USB identity candidates.
+- Applies selected EDID and USB identity values to JetKVM by backing up and updating `/userdata/kvm_config.json` over SSH, then offering to reboot JetKVM so the values load.
 
-## Planned EDID Selector
+## EDID And USB Identity
 
-JetFUEL is tracking EDID selector support for future deployment UI work. The plan covers JetKVM presets, common monitor presets, Windows monitor EDID capture, custom EDID validation, and possible JetKVM `setEDID` integration.
+JetFUEL can scan the Windows machine running the wizard for monitor EDID records and USB keyboard/mouse/HID VID/PID candidates.
+
+On the Identity tab:
+
+- `Scan PC` reads local monitor EDID and USB input candidates.
+- `Apply EDID` writes the selected EDID to JetKVM's `hdmi_edid_string` config value.
+- `Apply USB` writes the selected VID/PID/manufacturer/product to JetKVM's `usb_config` value.
+
+Both apply actions create a timestamped backup of `/userdata/kvm_config.json` first, then offer to reboot JetKVM so the KVM service reloads the setting.
+
+USB identity changes the JetKVM composite USB gadget identity. It does not fully clone every descriptor from a separate physical keyboard or mouse.
 
 See [docs/edid-selector-plan.md](docs/edid-selector-plan.md).
 

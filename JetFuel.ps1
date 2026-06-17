@@ -873,6 +873,244 @@ function Get-LocalUsbInputDevices {
     return $devices
 }
 
+function Assert-EdidHex {
+    param([AllowEmptyString()][string]$Hex)
+
+    if ([string]::IsNullOrWhiteSpace($Hex)) {
+        throw "Select a display EDID first."
+    }
+
+    $clean = ($Hex -replace '\s', '').ToUpperInvariant()
+    if ($clean -notmatch '^[0-9A-F]+$') {
+        throw "EDID must be hex only."
+    }
+    if ($clean.Length -ne 256 -and $clean.Length -ne 512) {
+        throw "EDID must be 128 or 256 bytes. The selected EDID is $($clean.Length / 2) bytes."
+    }
+    if (-not $clean.StartsWith("00FFFFFFFFFFFF00")) {
+        throw "EDID header is invalid. Expected 00FFFFFFFFFFFF00."
+    }
+
+    for ($blockStart = 0; $blockStart -lt $clean.Length; $blockStart += 256) {
+        $sum = 0
+        for ($i = $blockStart; $i -lt ($blockStart + 256); $i += 2) {
+            $sum = ($sum + [Convert]::ToInt32($clean.Substring($i, 2), 16)) -band 0xFF
+        }
+        if ($sum -ne 0) {
+            $blockNumber = [int](($blockStart / 256) + 1)
+            throw "EDID block $blockNumber checksum is invalid."
+        }
+    }
+
+    return $clean
+}
+
+function Set-JsonObjectProperty {
+    param(
+        [Parameter(Mandatory)]$Object,
+        [Parameter(Mandatory)][string]$Name,
+        [AllowNull()]$Value
+    )
+
+    $property = $Object.PSObject.Properties[$Name]
+    if ($property) {
+        $property.Value = $Value
+    } else {
+        Add-Member -InputObject $Object -NotePropertyName $Name -NotePropertyValue $Value
+    }
+}
+
+function Get-JetKvmConfigObject {
+    param(
+        [Parameter(Mandatory)][string]$JetKvmAddress,
+        [Parameter(Mandatory)][string]$KeyPath
+    )
+
+    $result = Invoke-JetKvmSshCommand -JetKvmAddress $JetKvmAddress -KeyPath $KeyPath -Command "cat /userdata/kvm_config.json 2>/dev/null || echo '{}'" -TimeoutSeconds 20
+    if ($result.ExitCode -ne 0) {
+        throw "Could not read JetKVM config with SSH. Exit code $($result.ExitCode)."
+    }
+
+    $text = [string]$result.Output
+    if ([string]::IsNullOrWhiteSpace($text)) { $text = "{}" }
+    $start = $text.IndexOf("{")
+    $end = $text.LastIndexOf("}")
+    if ($start -lt 0 -or $end -lt $start) {
+        throw "JetKVM config output did not contain JSON."
+    }
+
+    $json = $text.Substring($start, $end - $start + 1)
+    try {
+        $config = $json | ConvertFrom-Json
+    } catch {
+        throw "JetKVM config JSON could not be parsed: $($_.Exception.Message)"
+    }
+    if (-not $config) { $config = [pscustomobject]@{} }
+    return $config
+}
+
+function ConvertTo-WindowsProcessArgument {
+    param([AllowEmptyString()][string]$Value)
+
+    if ($null -eq $Value) { return '""' }
+    if ($Value.Length -eq 0) { return '""' }
+    if ($Value -notmatch '[\s"]') { return $Value }
+
+    $builder = [System.Text.StringBuilder]::new()
+    [void]$builder.Append('"')
+    $backslashes = 0
+    foreach ($char in $Value.ToCharArray()) {
+        if ($char -eq '\') {
+            $backslashes++
+            continue
+        }
+        if ($char -eq '"') {
+            [void]$builder.Append('\' * (($backslashes * 2) + 1))
+            [void]$builder.Append('"')
+            $backslashes = 0
+            continue
+        }
+        if ($backslashes -gt 0) {
+            [void]$builder.Append('\' * $backslashes)
+            $backslashes = 0
+        }
+        [void]$builder.Append($char)
+    }
+    if ($backslashes -gt 0) {
+        [void]$builder.Append('\' * ($backslashes * 2))
+    }
+    [void]$builder.Append('"')
+    return $builder.ToString()
+}
+
+function Copy-TextToJetKvmFile {
+    param(
+        [Parameter(Mandatory)][string]$JetKvmAddress,
+        [Parameter(Mandatory)][string]$KeyPath,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Content,
+        [Parameter(Mandatory)][string]$RemotePath,
+        [int]$TimeoutSeconds = 30
+    )
+
+    $ssh = Get-CommandPath -Name "ssh.exe"
+    if (-not $ssh) { $ssh = Get-CommandPath -Name "ssh" }
+    if (-not $ssh) { throw "OpenSSH client was not found. Enable Windows OpenSSH Client and try again." }
+
+    $sshArgs = @(
+        "-i", $KeyPath,
+        "-o", "BatchMode=yes",
+        "-o", "ConnectTimeout=8",
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "IdentitiesOnly=yes",
+        "root@$JetKvmAddress",
+        "umask 077; cat > $(ConvertTo-ShellSingleQuoted $RemotePath)"
+    )
+
+    $process = $null
+    try {
+        $psi = [Diagnostics.ProcessStartInfo]::new()
+        $psi.FileName = $ssh
+        $psi.Arguments = (($sshArgs | ForEach-Object { ConvertTo-WindowsProcessArgument $_ }) -join " ")
+        $psi.UseShellExecute = $false
+        $psi.RedirectStandardInput = $true
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.CreateNoWindow = $true
+
+        $process = [Diagnostics.Process]::Start($psi)
+        $process.StandardInput.Write($Content)
+        $process.StandardInput.Close()
+
+        if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+            try { $process.Kill() } catch {}
+            return @{
+                ExitCode = 124
+                TimedOut = $true
+                Output = "SSH write timed out after $TimeoutSeconds seconds."
+            }
+        }
+
+        $output = (($process.StandardOutput.ReadToEnd(), $process.StandardError.ReadToEnd()) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join "`n"
+        return @{
+            ExitCode = $process.ExitCode
+            TimedOut = $false
+            Output = $output.Trim()
+        }
+    } finally {
+        if ($process) { $process.Dispose() }
+    }
+}
+
+function Update-JetKvmConfig {
+    param(
+        [Parameter(Mandatory)][string]$JetKvmAddress,
+        [Parameter(Mandatory)][string]$KeyPath,
+        [Parameter(Mandatory)][scriptblock]$Update,
+        [scriptblock]$Log
+    )
+
+    $config = Get-JetKvmConfigObject -JetKvmAddress $JetKvmAddress -KeyPath $KeyPath
+    & $Update $config
+    $json = $config | ConvertTo-Json -Depth 30
+
+    $backupCmd = "if [ -f /userdata/kvm_config.json ]; then cp /userdata/kvm_config.json /userdata/kvm_config.json.jetfuel.bak.`$(date +%Y%m%d%H%M%S); fi"
+    $backup = Invoke-JetKvmSshCommand -JetKvmAddress $JetKvmAddress -KeyPath $KeyPath -Command $backupCmd -TimeoutSeconds 20
+    if ($backup.Output -and $Log) { $backup.Output -split "`n" | ForEach-Object { & $Log $_ } }
+    if ($backup.ExitCode -ne 0) {
+        throw "Could not back up JetKVM config. Exit code $($backup.ExitCode)."
+    }
+
+    $copy = Copy-TextToJetKvmFile -JetKvmAddress $JetKvmAddress -KeyPath $KeyPath -Content ($json + "`n") -RemotePath "/userdata/kvm_config.json" -TimeoutSeconds 30
+    if ($copy.Output -and $Log) { $copy.Output -split "`n" | ForEach-Object { & $Log $_ } }
+    if ($copy.ExitCode -ne 0) {
+        throw "Could not write JetKVM config. Exit code $($copy.ExitCode)."
+    }
+
+    $sync = Invoke-JetKvmSshCommand -JetKvmAddress $JetKvmAddress -KeyPath $KeyPath -Command "sync && echo '[OK] /userdata/kvm_config.json updated'" -TimeoutSeconds 20
+    if ($sync.Output -and $Log) { $sync.Output -split "`n" | ForEach-Object { & $Log $_ } }
+    if ($sync.ExitCode -ne 0) {
+        throw "JetKVM config was copied, but sync verification failed with exit code $($sync.ExitCode)."
+    }
+}
+
+function Update-JetKvmConfigProperty {
+    param(
+        [Parameter(Mandatory)][string]$JetKvmAddress,
+        [Parameter(Mandatory)][string]$KeyPath,
+        [Parameter(Mandatory)][string]$Name,
+        [AllowNull()]$Value,
+        [scriptblock]$Log
+    )
+
+    Update-JetKvmConfig -JetKvmAddress $JetKvmAddress -KeyPath $KeyPath -Log $Log -Update ({
+        param($config)
+        Set-JsonObjectProperty -Object $config -Name $Name -Value $Value
+    }.GetNewClosure())
+}
+
+function ConvertTo-JetKvmUsbConfig {
+    param([Parameter(Mandatory)]$Device)
+
+    if ($Device.VendorId -notmatch '^0x[0-9a-f]{4}$' -or $Device.ProductId -notmatch '^0x[0-9a-f]{4}$') {
+        throw "Selected USB device does not contain a valid VID/PID."
+    }
+
+    $manufacturer = ([string]$Device.Manufacturer -replace '[\x00-\x1F\x7F]', '').Trim()
+    $product = ([string]$Device.Name -replace '[\x00-\x1F\x7F]', '').Trim()
+    if ([string]::IsNullOrWhiteSpace($manufacturer)) { $manufacturer = "USB" }
+    if ([string]::IsNullOrWhiteSpace($product)) { $product = "USB Input Device" }
+    if ($manufacturer.Length -gt 64) { $manufacturer = $manufacturer.Substring(0, 64) }
+    if ($product.Length -gt 64) { $product = $product.Substring(0, 64) }
+
+    return [pscustomobject]@{
+        vendor_id = $Device.VendorId
+        product_id = $Device.ProductId
+        serial_number = ""
+        manufacturer = $manufacturer
+        product = $product
+    }
+}
+
 function Assert-TailscaleAuthKeyLooksUsable {
     param([AllowEmptyString()][string]$AuthKey)
 
@@ -1734,6 +1972,9 @@ function Start-JetFuelGuiV2 {
         $Button.Font = [Drawing.Font]::new("Segoe UI", 9, [Drawing.FontStyle]::Bold)
         $Button.Cursor = [Windows.Forms.Cursors]::Hand
         $Button.UseVisualStyleBackColor = $false
+        $Button.AutoSize = $false
+        $Button.AutoEllipsis = $true
+        $Button.TextAlign = [Drawing.ContentAlignment]::MiddleCenter
         $Button.FlatAppearance.BorderSize = 1
         if ($Kind -eq "Primary") {
             $Button.BackColor = $ui.Accent
@@ -1943,7 +2184,11 @@ Identity tab
 - MAC profile choices are local-administered generated addresses. They are labels for organization; JetFUEL does not clone this PC MAC and does not use real third-party vendor OUIs by default.
 - Applying or clearing a MAC override needs a JetKVM reboot before Ethernet uses the new value.
 - Scan this PC identity lists connected monitor EDID records and local USB input VID/PID candidates.
-- If several display or USB candidates are found, choose the one you want from the dropdowns. These selections are kept for this wizard run and will be used by the future EDID/USB apply workflow.
+- If several display or USB candidates are found, choose the one you want from the dropdowns.
+- Apply EDID writes the selected monitor EDID to JetKVM's hdmi_edid_string config value.
+- Apply USB writes the selected VID/PID/manufacturer/product to JetKVM's usb_config value.
+- EDID/USB apply creates a timestamped backup of /userdata/kvm_config.json, writes the new config over SSH/SCP, then offers to reboot the JetKVM so the KVM service reloads it.
+- USB identity changes the JetKVM composite USB gadget identity. It does not clone every descriptor from a separate physical keyboard or mouse.
 
 Settings tab
 - Custom script URL is only used when Step 3 is set to Custom URL.
@@ -2311,13 +2556,17 @@ Status log
     $identityScanGroup = New-Group "Display and USB identity"
     & $makeGroupAutoHeight $identityScanGroup
     $identityScanGrid = New-StepGrid 9
+    $identityScanGrid.ColumnStyles.Clear()
+    $identityScanGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, (S 145))) | Out-Null
+    $identityScanGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
+    $identityScanGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, (S 150))) | Out-Null
     $identityScanGrid.RowStyles.Clear()
-    foreach ($height in @(40, 24, 30, 24, 24, 30, 24, 30, 38)) {
+    foreach ($height in @(38, 24, 30, 24, 24, 30, 24, 42, 34)) {
         $identityScanGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, (S $height))) | Out-Null
     }
     $identityScanGroup.Controls.Add($identityScanGrid)
     $identityScanIntro = [Windows.Forms.Label]::new()
-    $identityScanIntro.Text = "Scan this Windows PC, then choose which local monitor EDID and USB input identity should be used later for JetKVM display/USB identity work."
+    $identityScanIntro.Text = "Scan this Windows PC, choose a display EDID or USB identity, then apply it to the JetKVM using the Setup tab IP and SSH key."
     $identityScanIntro.Dock = "Fill"
     $identityScanIntro.ForeColor = $ui.Muted
     $identityScanIntro.Font = [Drawing.Font]::new("Segoe UI", 9)
@@ -2325,7 +2574,7 @@ Status log
     $usbStatusLabel = New-RowLabel "USB input devices: not scanned"
     $selectedDisplayLabel = New-RowLabel "Selected display: none"
     $selectedUsbLabel = New-RowLabel "Selected USB identity: none"
-    $identityNote = New-RowLabel "Selections are saved in the wizard state for this run. Applying them to JetKVM will be added after the JetKVM RPC/config path is tested."
+    $identityNote = New-RowLabel "Apply writes /userdata/kvm_config.json over SSH, creates a timestamped backup, then offers to reboot so JetKVM reloads the value."
     $displayChoiceBox = [Windows.Forms.ComboBox]::new()
     $displayChoiceBox.Dock = "Fill"
     $displayChoiceBox.DropDownStyle = [Windows.Forms.ComboBoxStyle]::DropDownList
@@ -2345,28 +2594,40 @@ Status log
     $usbChoiceBox.DisplayMember = "DisplayName"
     $usbChoiceBox.Enabled = $false
     $scanThisPcButton = [Windows.Forms.Button]::new()
-    $scanThisPcButton.Text = "Scan this PC identity"
+    $scanThisPcButton.Text = "Scan PC"
     $scanThisPcButton.Dock = "Fill"
     $scanThisPcButton.Margin = New-ScaledPadding 8 2 8 2
     Set-ButtonStyle $scanThisPcButton "Secondary"
+    $applyEdidButton = [Windows.Forms.Button]::new()
+    $applyEdidButton.Text = "Apply EDID"
+    $applyEdidButton.Dock = "Fill"
+    $applyEdidButton.Margin = New-ScaledPadding 8 2 8 2
+    $applyEdidButton.Enabled = $false
+    Set-ButtonStyle $applyEdidButton "Primary"
+    $applyUsbButton = [Windows.Forms.Button]::new()
+    $applyUsbButton.Text = "Apply USB"
+    $applyUsbButton.Dock = "Fill"
+    $applyUsbButton.Margin = New-ScaledPadding 8 2 8 2
+    $applyUsbButton.Enabled = $false
+    Set-ButtonStyle $applyUsbButton "Primary"
     $identityScanGrid.Controls.Add($identityScanIntro, 0, 0)
     $identityScanGrid.SetColumnSpan($identityScanIntro, 3)
     $identityScanGrid.Controls.Add($edidStatusLabel, 0, 1)
     $identityScanGrid.SetColumnSpan($edidStatusLabel, 3)
     $identityScanGrid.Controls.Add((New-RowLabel "Display EDID to use"), 0, 2)
     $identityScanGrid.Controls.Add($displayChoiceBox, 1, 2)
-    $identityScanGrid.SetColumnSpan($displayChoiceBox, 2)
+    $identityScanGrid.Controls.Add($applyEdidButton, 2, 2)
     $identityScanGrid.Controls.Add($selectedDisplayLabel, 1, 3)
     $identityScanGrid.SetColumnSpan($selectedDisplayLabel, 2)
     $identityScanGrid.Controls.Add($usbStatusLabel, 0, 4)
     $identityScanGrid.SetColumnSpan($usbStatusLabel, 3)
     $identityScanGrid.Controls.Add((New-RowLabel "USB identity to use"), 0, 5)
     $identityScanGrid.Controls.Add($usbChoiceBox, 1, 5)
-    $identityScanGrid.SetColumnSpan($usbChoiceBox, 2)
+    $identityScanGrid.Controls.Add($applyUsbButton, 2, 5)
     $identityScanGrid.Controls.Add($selectedUsbLabel, 1, 6)
     $identityScanGrid.SetColumnSpan($selectedUsbLabel, 2)
     $identityScanGrid.Controls.Add($identityNote, 0, 7)
-    $identityScanGrid.SetColumnSpan($identityNote, 3)
+    $identityScanGrid.SetColumnSpan($identityNote, 2)
     $identityScanGrid.Controls.Add($scanThisPcButton, 2, 8)
     $identityLayout.Controls.Add($identityScanGroup, 0, 1)
 
@@ -2483,6 +2744,8 @@ Status log
         $applyMacButton.Enabled = -not $Busy
         $clearMacButton.Enabled = -not $Busy
         $scanThisPcButton.Enabled = -not $Busy
+        $applyEdidButton.Enabled = (-not $Busy) -and $displayChoiceBox.Enabled -and ($null -ne $displayChoiceBox.SelectedItem)
+        $applyUsbButton.Enabled = (-not $Busy) -and $usbChoiceBox.Enabled -and ($null -ne $usbChoiceBox.SelectedItem)
         $statusLabel.Text = $Status
         [Windows.Forms.Application]::DoEvents()
     }
@@ -2754,6 +3017,9 @@ echo '--- mac identity complete ---'
             $item = $displayChoiceBox.SelectedItem
             $selectedDisplayLabel.Text = "Selected display: $($item.DisplayName)"
             $selectedDisplayLabel.ForeColor = $ui.Good
+            $applyEdidButton.Enabled = $true
+        } else {
+            $applyEdidButton.Enabled = $false
         }
     })
 
@@ -2762,6 +3028,9 @@ echo '--- mac identity complete ---'
             $item = $usbChoiceBox.SelectedItem
             $selectedUsbLabel.Text = "Selected USB identity: $($item.DisplayName)"
             $selectedUsbLabel.ForeColor = $ui.Good
+            $applyUsbButton.Enabled = $true
+        } else {
+            $applyUsbButton.Enabled = $false
         }
     })
 
@@ -2770,10 +3039,12 @@ echo '--- mac identity complete ---'
             & $setBusy $true "Scanning this PC identity..."
             $displayChoiceBox.Items.Clear()
             $displayChoiceBox.Enabled = $false
+            $applyEdidButton.Enabled = $false
             $selectedDisplayLabel.Text = "Selected display: none"
             $selectedDisplayLabel.ForeColor = $ui.Muted
             $usbChoiceBox.Items.Clear()
             $usbChoiceBox.Enabled = $false
+            $applyUsbButton.Enabled = $false
             $selectedUsbLabel.Text = "Selected USB identity: none"
             $selectedUsbLabel.ForeColor = $ui.Muted
 
@@ -2813,8 +3084,89 @@ echo '--- mac identity complete ---'
                 $usbChoiceBox.DropDownWidth = [Math]::Max($usbChoiceBox.Width, (S 860))
                 $usbChoiceBox.SelectedIndex = 0
             }
-            & $log "Identity scan complete. Use the dropdowns to choose the display EDID and USB identity candidate for this run."
+            & $log "Identity scan complete. Choose an item from each dropdown, then use Apply EDID or Apply USB when ready."
             & $setBusy $false "Identity scan complete"
+        } catch {
+            & $log ("ERROR: " + $_.Exception.Message)
+            & $setBusy $false "Failed"
+            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null
+        }
+    })
+
+    $rebootJetKvmAfterIdentity = {
+        param([string]$Ip, [string]$KeyPath, [string]$Reason)
+
+        $reboot = [Windows.Forms.MessageBox]::Show(
+            "$Reason saved to the JetKVM config.`r`n`r`nReboot the JetKVM now so the KVM service reloads it? If you choose No, reboot later from the JetKVM UI.",
+            "Reboot JetKVM",
+            "YesNo",
+            "Question"
+        )
+        if ($reboot -eq [Windows.Forms.DialogResult]::Yes) {
+            try {
+                $null = Invoke-JetKvmSshCommand -JetKvmAddress $Ip -KeyPath $KeyPath -Command "( sleep 1; reboot ) >/dev/null 2>&1 &" -TimeoutSeconds 5
+            } catch {
+                & $log "Reboot command sent; SSH may disconnect while JetKVM restarts."
+            }
+            & $setBusy $false "JetKVM rebooting"
+        } else {
+            & $setBusy $false "$Reason saved"
+        }
+    }
+
+    $applyEdidButton.Add_Click({
+        try {
+            if (-not $displayChoiceBox.SelectedItem) { throw "Scan this PC identity and select a display EDID first." }
+            $item = $displayChoiceBox.SelectedItem
+            $edid = Assert-EdidHex -Hex $item.Hex
+            $answer = [Windows.Forms.MessageBox]::Show(
+                "Apply this display EDID to the JetKVM?`r`n`r`n$($item.DisplayName)`r`n`r`nJetFUEL will back up /userdata/kvm_config.json, write hdmi_edid_string, then offer to reboot.",
+                "Apply JetKVM EDID",
+                "YesNo",
+                "Warning"
+            )
+            if ($answer -ne [Windows.Forms.DialogResult]::Yes) {
+                & $log "EDID apply cancelled."
+                return
+            }
+
+            & $setBusy $true "Applying EDID..."
+            $ip = $ipBox.Text.Trim()
+            $keyPath = $keyBox.Text.Trim()
+            Assert-ValidIpOrHost -Value $ip
+            Update-JetKvmConfigProperty -JetKvmAddress $ip -KeyPath $keyPath -Name "hdmi_edid_string" -Value $edid -Log $log
+            & $log "EDID saved to JetKVM config: $($item.DisplayName)"
+            & $rebootJetKvmAfterIdentity $ip $keyPath "EDID"
+        } catch {
+            & $log ("ERROR: " + $_.Exception.Message)
+            & $setBusy $false "Failed"
+            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null
+        }
+    })
+
+    $applyUsbButton.Add_Click({
+        try {
+            if (-not $usbChoiceBox.SelectedItem) { throw "Scan this PC identity and select a USB identity first." }
+            $item = $usbChoiceBox.SelectedItem
+            $usbConfig = ConvertTo-JetKvmUsbConfig -Device $item
+            $answer = [Windows.Forms.MessageBox]::Show(
+                "Apply this USB identity to the JetKVM?`r`n`r`n$($item.DisplayName)`r`n`r`nThis changes the JetKVM composite USB vendor/product identity only. It does not clone every descriptor from a physical keyboard or mouse.",
+                "Apply JetKVM USB identity",
+                "YesNo",
+                "Warning"
+            )
+            if ($answer -ne [Windows.Forms.DialogResult]::Yes) {
+                & $log "USB identity apply cancelled."
+                return
+            }
+
+            & $setBusy $true "Applying USB identity..."
+            $ip = $ipBox.Text.Trim()
+            $keyPath = $keyBox.Text.Trim()
+            Assert-ValidIpOrHost -Value $ip
+            Update-JetKvmConfigProperty -JetKvmAddress $ip -KeyPath $keyPath -Name "usb_config" -Value $usbConfig -Log $log
+            & $log ("USB identity saved to JetKVM config: {0}:{1} {2} - {3}" -f $usbConfig.vendor_id, $usbConfig.product_id, $usbConfig.manufacturer, $usbConfig.product)
+            & $rebootJetKvmAfterIdentity $ip $keyPath "USB identity"
         } catch {
             & $log ("ERROR: " + $_.Exception.Message)
             & $setBusy $false "Failed"

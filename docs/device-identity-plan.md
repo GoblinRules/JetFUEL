@@ -135,9 +135,9 @@ Validation:
 Apply path:
 
 1. Read and validate EDID locally.
-2. Apply using JetKVM `setEDID` if JetFUEL can access the JSON-RPC route safely.
-3. Read back with `getEDID`.
-4. Fall back to copying the EDID and opening the JetKVM WebUI if the RPC route is not available.
+2. JetKVM's app supports `setEDID`, but that JSON-RPC path is carried over the app/WebRTC data channel rather than a simple local HTTP endpoint.
+3. JetFUEL applies EDID by backing up `/userdata/kvm_config.json`, writing `hdmi_edid_string` over SSH, then prompting for a JetKVM reboot so the KVM service reloads it.
+4. Keep WebUI/RPC apply as a future improvement only if a reliable local RPC transport is exposed.
 
 ## USB keyboard and mouse identity
 
@@ -184,8 +184,10 @@ Current JetFUEL implementation:
 
 - `Scan this PC identity` logs local monitor EDID records and USB keyboard/mouse/HID VID/PID candidates.
 - Scan results are also shown in dropdowns using human-readable names where Windows exposes them.
-- The selected display EDID and USB identity candidate are kept in the wizard state for the current run.
-- Applying EDID/USB identity to JetKVM is not wired yet. The next step is testing the JetKVM JSON-RPC route or a safe config-file apply path for `/userdata/kvm_config.json`.
+- The selected display EDID and USB identity candidate can be applied from the Identity tab.
+- `Apply EDID` validates 128/256 byte EDID hex, backs up `/userdata/kvm_config.json`, writes `hdmi_edid_string`, syncs the file, and offers to reboot JetKVM.
+- `Apply USB` writes the selected VID/PID/manufacturer/product into `usb_config`, syncs the file, and offers to reboot JetKVM.
+- USB apply changes the JetKVM composite gadget identity only. It does not promise an exact clone of all physical keyboard/mouse descriptors.
 
 Windows capture options:
 
@@ -235,7 +237,7 @@ Keep MAC changes behind an advanced warning. EDID and USB changes can be normal 
 
 ## Open implementation questions
 
-- Whether JetKVM JSON-RPC can be used reliably from JetFUEL without browser session state.
+- Whether JetKVM JSON-RPC can be used reliably from JetFUEL without browser/WebRTC session state.
 - Whether USB identity and EDID should be applied during initial setup or as a separate post-install action.
 - Whether to store curated EDIDs locally in `data/edid-presets.json`.
 - Whether to include only common 1080p/1200p/1440p presets initially, or also 4K/ultrawide options.
