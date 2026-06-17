@@ -873,6 +873,102 @@ function Get-LocalUsbInputDevices {
     return $devices
 }
 
+function Get-JetKvmEdidPresets {
+    # Values mirrored from JetKVM's video settings UI presets.
+    return @(
+        [pscustomobject]@{
+            DisplayName = "JetKVM default - JetKVM v1 1920x1080@60 / 1280x720 (256 bytes)"
+            Name = "JetKVM default"
+            Source = "JetKVM preset"
+            Bytes = 256
+            Hex = "00FFFFFFFFFFFF0028B4010001EEFFC0302301038047287856EE91A3544C99260F5054000000D1C081C0318001010101010101010101023A801871382D40582C4500C48E2100001E773300A050D02B2030203500122C2100001A000000FD00174C0F5111000A202020202020000000FC004A65744B564D2076310A20202001D5020322D1431004012309070783010000E200CFE40D100401E305000065030C001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000CF"
+            IsPreset = $true
+        },
+        [pscustomobject]@{
+            DisplayName = "JetKVM preset - Acer B246WL (256 bytes)"
+            Name = "Acer B246WL"
+            Source = "JetKVM preset"
+            Bytes = 256
+            Hex = "00FFFFFFFFFFFF00047265058A3F6101101E0104A53420783FC125A8554EA0260D5054BFEF80714F8140818081C081008B009500B300283C80A070B023403020360006442100001A000000FD00304C575716010A202020202020000000FC0042323436574C0A202020202020000000FF0054384E4545303033383532320A01F802031CF14F90020304050607011112131415161F2309070783010000011D8018711C1620582C250006442100009E011D007251D01E206E28550006442100001E8C0AD08A20E02D10103E9600064421000018C344806E70B028401720A80406442100001E00000000000000000000000000000000000000000000000000000096"
+            IsPreset = $true
+        },
+        [pscustomobject]@{
+            DisplayName = "JetKVM preset - ASUS PA248QV (256 bytes)"
+            Name = "ASUS PA248QV"
+            Source = "JetKVM preset"
+            Bytes = 256
+            Hex = "00FFFFFFFFFFFF0006B3872401010101021F010380342078EA6DB5A7564EA0250D5054BF6F00714F8180814081C0A9409500B300D1C0283C80A070B023403020360006442100001A000000FD00314B1E5F19000A202020202020000000FC00504132343851560A2020202020000000FF004D314C4D51533035323135370A014D02032AF14B900504030201111213141F230907078301000065030C001000681A00000101314BE6E2006A023A801871382D40582C450006442100001ECD5F80B072B0374088D0360006442100001C011D007251D01E206E28550006442100001E8C0AD08A20E02D10103E960006442100001800000000000000000000000000DC"
+            IsPreset = $true
+        },
+        [pscustomobject]@{
+            DisplayName = "JetKVM preset - Dell D2721H (256 bytes)"
+            Name = "Dell D2721H"
+            Source = "JetKVM preset"
+            Bytes = 256
+            Hex = "00FFFFFFFFFFFF0010AC132045393639201E0103803C22782ACD25A3574B9F270D5054A54B00714F8180A9C0D1C00101010101010101023A801871382D40582C450056502100001E000000FF00335335475132330A2020202020000000FC0044454C4C204432373231480A20000000FD00384C1E5311000A202020202020018102031AB14F90050403020716010611121513141F65030C001000023A801871382D40582C450056502100001E011D8018711C1620582C250056502100009E011D007251D01E206E28550056502100001E8C0AD08A20E02D10103E960056502100001800000000000000000000000000000000000000000000000000000000004F"
+            IsPreset = $true
+        },
+        [pscustomobject]@{
+            DisplayName = "JetKVM preset - Dell iDRAC (128 bytes)"
+            Name = "Dell iDRAC"
+            Source = "JetKVM preset"
+            Bytes = 128
+            Hex = "00FFFFFFFFFFFF0010AC0100020000000111010380221BFF0A00000000000000000000ADCE0781800101010101010101010101010101000000FF0030303030303030303030303030000000FF0030303030303030303030303030000000FD00384C1F530B000A000000000000000000FC0044454C4C2049445241430A2020000A"
+            IsPreset = $true
+        }
+    )
+}
+
+function Get-JetKvmUsbIdentityPresets {
+    # Values mirrored from JetKVM's Hardware > USB identifiers presets.
+    return @(
+        [pscustomobject]@{
+            DisplayName = "JetKVM default - USB Emulation Device (0x1d6b:0x0104)"
+            Name = "USB Emulation Device"
+            Manufacturer = "JetKVM"
+            Class = "JetKVM preset"
+            VendorId = "0x1d6b"
+            ProductId = "0x0104"
+            SerialNumber = ""
+            Source = "JetKVM preset"
+            IsPreset = $true
+        },
+        [pscustomobject]@{
+            DisplayName = "JetKVM preset - Logitech USB Input Device (0x046d:0xc52b)"
+            Name = "Logitech USB Input Device"
+            Manufacturer = "Logitech (x64)"
+            Class = "JetKVM preset"
+            VendorId = "0x046d"
+            ProductId = "0xc52b"
+            SerialNumber = ""
+            Source = "JetKVM preset"
+            IsPreset = $true
+        },
+        [pscustomobject]@{
+            DisplayName = "JetKVM preset - Microsoft Wireless MultiMedia Keyboard (0x045e:0x005f)"
+            Name = "Wireless MultiMedia Keyboard"
+            Manufacturer = "Microsoft"
+            Class = "JetKVM preset"
+            VendorId = "0x045e"
+            ProductId = "0x005f"
+            SerialNumber = ""
+            Source = "JetKVM preset"
+            IsPreset = $true
+        },
+        [pscustomobject]@{
+            DisplayName = "JetKVM preset - Dell Multimedia Pro Keyboard (0x413c:0x2011)"
+            Name = "Multimedia Pro Keyboard"
+            Manufacturer = "Dell Inc."
+            Class = "JetKVM preset"
+            VendorId = "0x413c"
+            ProductId = "0x2011"
+            SerialNumber = ""
+            Source = "JetKVM preset"
+            IsPreset = $true
+        }
+    )
+}
+
 function Assert-EdidHex {
     param([AllowEmptyString()][string]$Hex)
 
@@ -1041,17 +1137,15 @@ function Copy-TextToJetKvmFile {
     }
 }
 
-function Update-JetKvmConfig {
+function Save-JetKvmConfigObject {
     param(
         [Parameter(Mandatory)][string]$JetKvmAddress,
         [Parameter(Mandatory)][string]$KeyPath,
-        [Parameter(Mandatory)][scriptblock]$Update,
+        [Parameter(Mandatory)]$Config,
         [scriptblock]$Log
     )
 
-    $config = Get-JetKvmConfigObject -JetKvmAddress $JetKvmAddress -KeyPath $KeyPath
-    & $Update $config
-    $json = $config | ConvertTo-Json -Depth 30
+    $json = $Config | ConvertTo-Json -Depth 30
 
     $backupCmd = "if [ -f /userdata/kvm_config.json ]; then cp /userdata/kvm_config.json /userdata/kvm_config.json.jetfuel.bak.`$(date +%Y%m%d%H%M%S); fi"
     $backup = Invoke-JetKvmSshCommand -JetKvmAddress $JetKvmAddress -KeyPath $KeyPath -Command $backupCmd -TimeoutSeconds 20
@@ -1073,6 +1167,19 @@ function Update-JetKvmConfig {
     }
 }
 
+function Update-JetKvmConfig {
+    param(
+        [Parameter(Mandatory)][string]$JetKvmAddress,
+        [Parameter(Mandatory)][string]$KeyPath,
+        [Parameter(Mandatory)][scriptblock]$Update,
+        [scriptblock]$Log
+    )
+
+    $config = Get-JetKvmConfigObject -JetKvmAddress $JetKvmAddress -KeyPath $KeyPath
+    & $Update $config
+    Save-JetKvmConfigObject -JetKvmAddress $JetKvmAddress -KeyPath $KeyPath -Config $config -Log $Log
+}
+
 function Update-JetKvmConfigProperty {
     param(
         [Parameter(Mandatory)][string]$JetKvmAddress,
@@ -1082,10 +1189,61 @@ function Update-JetKvmConfigProperty {
         [scriptblock]$Log
     )
 
-    Update-JetKvmConfig -JetKvmAddress $JetKvmAddress -KeyPath $KeyPath -Log $Log -Update ({
-        param($config)
-        Set-JsonObjectProperty -Object $config -Name $Name -Value $Value
-    }.GetNewClosure())
+    $config = Get-JetKvmConfigObject -JetKvmAddress $JetKvmAddress -KeyPath $KeyPath
+    Set-JsonObjectProperty -Object $config -Name $Name -Value $Value
+    Save-JetKvmConfigObject -JetKvmAddress $JetKvmAddress -KeyPath $KeyPath -Config $config -Log $Log
+}
+
+function Assert-JetKvmDomain {
+    param([AllowEmptyString()][string]$Value)
+    if ([string]::IsNullOrWhiteSpace($Value)) { throw "Custom domain is empty." }
+    $clean = $Value.Trim().ToLowerInvariant()
+    if ($clean -eq "dhcp" -or $clean -eq "local") { return }
+    $label = '[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?'
+    if ($clean -notmatch "^$label(\.$label)*$") {
+        throw "Custom domain must be lowercase DNS labels separated by dots, with no spaces or underscores."
+    }
+}
+
+function Update-JetKvmDeviceSettings {
+    param(
+        [Parameter(Mandatory)][string]$JetKvmAddress,
+        [Parameter(Mandatory)][string]$KeyPath,
+        [Parameter(Mandatory)][bool]$AutoUpdateEnabled,
+        [Parameter(Mandatory)][string]$KeyboardLayout,
+        [Parameter(Mandatory)][int]$DisplayMaxBrightness,
+        [Parameter(Mandatory)][int]$DisplayDimAfterSec,
+        [Parameter(Mandatory)][int]$DisplayOffAfterSec,
+        [Parameter(Mandatory)][int]$VideoSleepAfterSec,
+        [Parameter(Mandatory)][bool]$SetNetworkHostname,
+        [AllowEmptyString()][string]$NetworkHostname,
+        [Parameter(Mandatory)][string]$Domain,
+        [Parameter(Mandatory)][string]$MDNSMode,
+        [Parameter(Mandatory)][string]$IPv6Mode,
+        [scriptblock]$Log
+    )
+
+    $config = Get-JetKvmConfigObject -JetKvmAddress $JetKvmAddress -KeyPath $KeyPath
+    Set-JsonObjectProperty -Object $config -Name "auto_update_enabled" -Value $AutoUpdateEnabled
+    Set-JsonObjectProperty -Object $config -Name "keyboard_layout" -Value $KeyboardLayout
+    Set-JsonObjectProperty -Object $config -Name "display_max_brightness" -Value $DisplayMaxBrightness
+    Set-JsonObjectProperty -Object $config -Name "display_dim_after_sec" -Value $DisplayDimAfterSec
+    Set-JsonObjectProperty -Object $config -Name "display_off_after_sec" -Value $DisplayOffAfterSec
+    Set-JsonObjectProperty -Object $config -Name "video_sleep_after_sec" -Value $VideoSleepAfterSec
+
+    if (-not $config.PSObject.Properties["network_config"] -or $null -eq $config.network_config) {
+        Set-JsonObjectProperty -Object $config -Name "network_config" -Value ([pscustomobject]@{})
+    }
+
+    $network = $config.network_config
+    if ($SetNetworkHostname) {
+        Set-JsonObjectProperty -Object $network -Name "hostname" -Value $NetworkHostname
+    }
+    Set-JsonObjectProperty -Object $network -Name "domain" -Value $Domain
+    Set-JsonObjectProperty -Object $network -Name "mdns_mode" -Value $MDNSMode
+    Set-JsonObjectProperty -Object $network -Name "ipv6_mode" -Value $IPv6Mode
+
+    Save-JetKvmConfigObject -JetKvmAddress $JetKvmAddress -KeyPath $KeyPath -Config $config -Log $Log
 }
 
 function ConvertTo-JetKvmUsbConfig {
@@ -1101,11 +1259,16 @@ function ConvertTo-JetKvmUsbConfig {
     if ([string]::IsNullOrWhiteSpace($product)) { $product = "USB Input Device" }
     if ($manufacturer.Length -gt 64) { $manufacturer = $manufacturer.Substring(0, 64) }
     if ($product.Length -gt 64) { $product = $product.Substring(0, 64) }
+    $serial = ""
+    if ($Device.PSObject.Properties["SerialNumber"]) {
+        $serial = ([string]$Device.SerialNumber -replace '[\x00-\x1F\x7F]', '').Trim()
+        if ($serial.Length -gt 64) { $serial = $serial.Substring(0, 64) }
+    }
 
     return [pscustomobject]@{
         vendor_id = $Device.VendorId
         product_id = $Device.ProductId
-        serial_number = ""
+        serial_number = $serial
         manufacturer = $manufacturer
         product = $product
     }
@@ -1994,6 +2157,42 @@ function Start-JetFuelGuiV2 {
         $CheckBox.Margin = New-ScaledPadding 0 1 8 1
     }
 
+    function New-Option([string]$Label, [object]$Value) {
+        return [pscustomobject]@{
+            Label = $Label
+            Value = $Value
+        }
+    }
+
+    function New-OptionBox([object[]]$Options, [object]$SelectedValue = $null) {
+        $box = [Windows.Forms.ComboBox]::new()
+        $box.Dock = "Fill"
+        $box.DropDownStyle = [Windows.Forms.ComboBoxStyle]::DropDownList
+        $box.Margin = New-ScaledPadding 0 2 8 2
+        $box.BackColor = $ui.Input
+        $box.ForeColor = $ui.InputText
+        $box.Font = [Drawing.Font]::new("Segoe UI", 9)
+        $box.DisplayMember = "Label"
+        foreach ($option in $Options) { [void]$box.Items.Add($option) }
+        if ($box.Items.Count -gt 0) {
+            $box.SelectedIndex = 0
+            if ($null -ne $SelectedValue) {
+                for ($i = 0; $i -lt $box.Items.Count; $i++) {
+                    if ([string]$box.Items[$i].Value -eq [string]$SelectedValue) {
+                        $box.SelectedIndex = $i
+                        break
+                    }
+                }
+            }
+        }
+        return $box
+    }
+
+    function Get-SelectedOptionValue([Windows.Forms.ComboBox]$Box) {
+        if (-not $Box.SelectedItem) { return $null }
+        return $Box.SelectedItem.Value
+    }
+
     $pageShell = [Windows.Forms.TableLayoutPanel]::new()
     $pageShell.Dock = "Fill"
     $pageShell.BackColor = $ui.Window
@@ -2063,6 +2262,7 @@ function Start-JetFuelGuiV2 {
     $settingsPage = [Windows.Forms.Panel]::new()
     $settingsPage.Dock = "Fill"
     $settingsPage.BackColor = $ui.Window
+    $settingsPage.AutoScroll = $true
     $helpPage = [Windows.Forms.Panel]::new()
     $helpPage.Dock = "Fill"
     $helpPage.BackColor = $ui.Window
@@ -2103,12 +2303,15 @@ function Start-JetFuelGuiV2 {
     $tailscalePage.Controls.Add($tailscaleLayout)
 
     $settingsLayout = [Windows.Forms.TableLayoutPanel]::new()
-    $settingsLayout.Dock = "Fill"
+    $settingsLayout.Dock = "Top"
+    $settingsLayout.AutoSize = $true
+    $settingsLayout.AutoSizeMode = [Windows.Forms.AutoSizeMode]::GrowAndShrink
     $settingsLayout.BackColor = $ui.Window
     $settingsLayout.ColumnCount = 1
-    $settingsLayout.RowCount = 1
+    $settingsLayout.RowCount = 2
     $settingsLayout.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
-    $settingsLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
+    $settingsLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::AutoSize)) | Out-Null
+    $settingsLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::AutoSize)) | Out-Null
     $settingsPage.Controls.Add($settingsLayout)
 
     $identityLayout = [Windows.Forms.TableLayoutPanel]::new()
@@ -2183,11 +2386,11 @@ Identity tab
 - Network MAC identity lets you read the active JetKVM MAC, write a generated/custom user override, or clear the user override.
 - MAC profile choices are local-administered generated addresses. They are labels for organization; JetFUEL does not clone this PC MAC and does not use real third-party vendor OUIs by default.
 - Applying or clearing a MAC override needs a JetKVM reboot before Ethernet uses the new value.
-- Scan this PC identity lists connected monitor EDID records and local USB input VID/PID candidates.
+- Scan this PC identity loads JetKVM's default EDID/USB presets, then adds connected monitor EDID records and local USB input VID/PID candidates.
 - If several display or USB candidates are found, choose the one you want from the dropdowns.
-- Apply EDID writes the selected monitor EDID to JetKVM's hdmi_edid_string config value.
+- Apply EDID writes the selected EDID hex content to JetKVM's hdmi_edid_string config value. This is the same content JetKVM's Video page calls EDID File.
 - Apply USB writes the selected VID/PID/manufacturer/product to JetKVM's usb_config value.
-- EDID/USB apply creates a timestamped backup of /userdata/kvm_config.json, writes the new config over SSH/SCP, then offers to reboot the JetKVM so the KVM service reloads it.
+- EDID/USB apply creates a timestamped backup of /userdata/kvm_config.json, writes the new config over SSH, then offers to reboot the JetKVM so the KVM service reloads it.
 - USB identity changes the JetKVM composite USB gadget identity. It does not clone every descriptor from a separate physical keyboard or mouse.
 
 Settings tab
@@ -2197,6 +2400,9 @@ Settings tab
 - Custom scripts must keep the same command-line contract:
   [-v|--version <tailscale-version>] [-y|--yes] [-c|--clean] <JetKVM-IP> [-- <tailscale up args...>]
 - Custom scripts must install/configure Tailscale on the JetKVM, handle reboot/return, and print any Tailscale login URL.
+- JetKVM device settings can apply config-backed defaults: auto update, keyboard layout, display brightness/timers, HDMI sleep, network hostname/domain, mDNS, and IPv6 mode.
+- The local password is not written by this wizard yet. Set or change it in JetKVM Settings > Access.
+- Hide Header and Hide Status Bar are browser UI preferences in the JetKVM web app, not JetKVM device config values, so JetFUEL does not push them over SSH.
 
 Troubleshooting
 - If Git Bash is missing, JetFUEL can install Git for Windows only when winget is installed and working.
@@ -2574,7 +2780,7 @@ Status log
     $usbStatusLabel = New-RowLabel "USB input devices: not scanned"
     $selectedDisplayLabel = New-RowLabel "Selected display: none"
     $selectedUsbLabel = New-RowLabel "Selected USB identity: none"
-    $identityNote = New-RowLabel "Apply writes /userdata/kvm_config.json over SSH, creates a timestamped backup, then offers to reboot so JetKVM reloads the value."
+    $identityNote = New-RowLabel "Apply writes /userdata/kvm_config.json over SSH, creates a timestamped backup, then offers to reboot. EDID uses the same hex content shown as EDID File in the JetKVM UI."
     $displayChoiceBox = [Windows.Forms.ComboBox]::new()
     $displayChoiceBox.Dock = "Fill"
     $displayChoiceBox.DropDownStyle = [Windows.Forms.ComboBoxStyle]::DropDownList
@@ -2631,7 +2837,30 @@ Status log
     $identityScanGrid.Controls.Add($scanThisPcButton, 2, 8)
     $identityLayout.Controls.Add($identityScanGroup, 0, 1)
 
-    $settingsGroup = New-Group "Settings"
+    foreach ($preset in @(Get-JetKvmEdidPresets)) { [void]$displayChoiceBox.Items.Add($preset) }
+    $displayChoiceBox.Enabled = ($displayChoiceBox.Items.Count -gt 0)
+    $applyEdidButton.Enabled = $displayChoiceBox.Enabled
+    if ($displayChoiceBox.Items.Count -gt 0) { $displayChoiceBox.SelectedIndex = 0 }
+    if ($displayChoiceBox.SelectedItem) {
+        $selectedDisplayLabel.Text = "Selected display: $($displayChoiceBox.SelectedItem.DisplayName)"
+        $selectedDisplayLabel.ForeColor = $ui.Good
+    }
+    $edidStatusLabel.Text = "Display EDID: JetKVM presets loaded; scan PC to add local monitors"
+    $edidStatusLabel.ForeColor = $ui.Info
+
+    foreach ($preset in @(Get-JetKvmUsbIdentityPresets)) { [void]$usbChoiceBox.Items.Add($preset) }
+    $usbChoiceBox.Enabled = ($usbChoiceBox.Items.Count -gt 0)
+    $applyUsbButton.Enabled = $usbChoiceBox.Enabled
+    if ($usbChoiceBox.Items.Count -gt 0) { $usbChoiceBox.SelectedIndex = 0 }
+    if ($usbChoiceBox.SelectedItem) {
+        $selectedUsbLabel.Text = "Selected USB identity: $($usbChoiceBox.SelectedItem.DisplayName)"
+        $selectedUsbLabel.ForeColor = $ui.Good
+    }
+    $usbStatusLabel.Text = "USB identity: JetKVM presets loaded; scan PC to add local USB candidates"
+    $usbStatusLabel.ForeColor = $ui.Info
+
+    $settingsGroup = New-Group "Installer sources"
+    & $makeGroupAutoHeight $settingsGroup
     $settingsGrid = New-StepGrid 8
     $settingsGroup.Controls.Add($settingsGrid)
     $settingsIntro = [Windows.Forms.Label]::new()
@@ -2673,6 +2902,144 @@ Status log
     $settingsGrid.SetColumnSpan($requirementsLabel, 3)
     $settingsGrid.SetRowSpan($requirementsLabel, 4)
     $settingsLayout.Controls.Add($settingsGroup, 0, 0)
+
+    $deviceSettingsGroup = New-Group "JetKVM device settings"
+    & $makeGroupAutoHeight $deviceSettingsGroup
+    $deviceSettingsGrid = New-StepGrid 17
+    $deviceSettingsGrid.RowStyles.Clear()
+    foreach ($height in @(38, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 50, 34, 38)) {
+        $deviceSettingsGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, (S $height))) | Out-Null
+    }
+    $deviceSettingsGroup.Controls.Add($deviceSettingsGrid)
+
+    $deviceSettingsIntro = [Windows.Forms.Label]::new()
+    $deviceSettingsIntro.Text = "Optional device defaults written to /userdata/kvm_config.json over SSH. These are config-backed JetKVM settings and normally need a reboot to take effect."
+    $deviceSettingsIntro.Dock = "Fill"
+    $deviceSettingsIntro.ForeColor = $ui.Muted
+    $deviceSettingsIntro.Font = [Drawing.Font]::new("Segoe UI", 9)
+
+    $disableAutoUpdateCheck = [Windows.Forms.CheckBox]::new()
+    $disableAutoUpdateCheck.Text = "Disable JetKVM auto update"
+    $disableAutoUpdateCheck.Checked = $true
+    $disableAutoUpdateCheck.Dock = "Fill"
+    Set-CheckStyle $disableAutoUpdateCheck
+
+    $keyboardLayoutBox = New-OptionBox @(
+        (New-Option "English (UK) - JetKVM en-UK" "en-UK"),
+        (New-Option "English (US) - JetKVM default" "en-US")
+    ) "en-UK"
+
+    $displayBrightnessBox = New-OptionBox @(
+        (New-Option "Off (0)" 0),
+        (New-Option "Low (10)" 10),
+        (New-Option "Medium (35)" 35),
+        (New-Option "High (64) - JetKVM default" 64)
+    ) 10
+
+    $dimDisplayBox = New-OptionBox @(
+        (New-Option "Never" 0),
+        (New-Option "1 minute" 60),
+        (New-Option "5 minutes" 300),
+        (New-Option "10 minutes" 600),
+        (New-Option "30 minutes - JetKVM default" 1800),
+        (New-Option "1 hour" 3600)
+    ) 60
+
+    $offDisplayBox = New-OptionBox @(
+        (New-Option "Never" 0),
+        (New-Option "5 minutes" 300),
+        (New-Option "10 minutes" 600),
+        (New-Option "30 minutes - JetKVM default" 1800),
+        (New-Option "1 hour" 3600)
+    ) 300
+
+    $hdmiSleepBox = New-OptionBox @(
+        (New-Option "Disabled" -1),
+        (New-Option "Enabled after 90 seconds" 90),
+        (New-Option "JetKVM default (1 minute)" 0)
+    ) -1
+
+    $setNetworkHostnameCheck = [Windows.Forms.CheckBox]::new()
+    $setNetworkHostnameCheck.Text = "Set network hostname"
+    $setNetworkHostnameCheck.Checked = $false
+    $setNetworkHostnameCheck.Dock = "Fill"
+    Set-CheckStyle $setNetworkHostnameCheck
+    $networkHostnameBox = New-Field ""
+    $networkHostnameBox.Enabled = $false
+
+    $domainBox = New-OptionBox @(
+        (New-Option "DHCP provided" "dhcp"),
+        (New-Option ".local" "local"),
+        (New-Option "Custom domain" "custom")
+    ) "dhcp"
+    $customDomainBox = New-Field ""
+    $customDomainBox.Enabled = $false
+
+    $mdnsBox = New-OptionBox @(
+        (New-Option "Disabled" "disabled"),
+        (New-Option "Auto - JetKVM default" "auto"),
+        (New-Option "IPv4 only" "ipv4_only"),
+        (New-Option "IPv6 only" "ipv6_only")
+    ) "disabled"
+
+    $ipv6Box = New-OptionBox @(
+        (New-Option "Disabled" "disabled"),
+        (New-Option "SLAAC - JetKVM default" "slaac"),
+        (New-Option "Link-local only" "link_local")
+    ) "disabled"
+
+    $deviceSettingsNote = [Windows.Forms.Label]::new()
+    $deviceSettingsNote.Text = "Notes: local password should still be set in JetKVM Access UI for now. Hide Header/Status Bar are browser UI preferences, not JetKVM device config values. Static IPv6 is intentionally left to the JetKVM UI because it needs address/gateway/DNS fields."
+    $deviceSettingsNote.Dock = "Fill"
+    $deviceSettingsNote.ForeColor = $ui.Warn
+    $deviceSettingsNote.Font = [Drawing.Font]::new("Segoe UI", 9)
+
+    $applyDeviceSettingsButton = [Windows.Forms.Button]::new()
+    $applyDeviceSettingsButton.Text = "Apply settings"
+    $applyDeviceSettingsButton.Dock = "Fill"
+    $applyDeviceSettingsButton.Margin = New-ScaledPadding 8 2 8 2
+    Set-ButtonStyle $applyDeviceSettingsButton "Primary"
+
+    $deviceSettingsGrid.Controls.Add($deviceSettingsIntro, 0, 0)
+    $deviceSettingsGrid.SetColumnSpan($deviceSettingsIntro, 3)
+    $deviceSettingsGrid.Controls.Add($disableAutoUpdateCheck, 1, 1)
+    $deviceSettingsGrid.SetColumnSpan($disableAutoUpdateCheck, 2)
+    $deviceSettingsGrid.Controls.Add((New-RowLabel "Keyboard layout"), 0, 2)
+    $deviceSettingsGrid.Controls.Add($keyboardLayoutBox, 1, 2)
+    $deviceSettingsGrid.SetColumnSpan($keyboardLayoutBox, 2)
+    $deviceSettingsGrid.Controls.Add((New-RowLabel "Display brightness"), 0, 3)
+    $deviceSettingsGrid.Controls.Add($displayBrightnessBox, 1, 3)
+    $deviceSettingsGrid.SetColumnSpan($displayBrightnessBox, 2)
+    $deviceSettingsGrid.Controls.Add((New-RowLabel "Dim display after"), 0, 4)
+    $deviceSettingsGrid.Controls.Add($dimDisplayBox, 1, 4)
+    $deviceSettingsGrid.SetColumnSpan($dimDisplayBox, 2)
+    $deviceSettingsGrid.Controls.Add((New-RowLabel "Turn off display after"), 0, 5)
+    $deviceSettingsGrid.Controls.Add($offDisplayBox, 1, 5)
+    $deviceSettingsGrid.SetColumnSpan($offDisplayBox, 2)
+    $deviceSettingsGrid.Controls.Add((New-RowLabel "HDMI sleep mode"), 0, 6)
+    $deviceSettingsGrid.Controls.Add($hdmiSleepBox, 1, 6)
+    $deviceSettingsGrid.SetColumnSpan($hdmiSleepBox, 2)
+    $deviceSettingsGrid.Controls.Add($setNetworkHostnameCheck, 1, 7)
+    $deviceSettingsGrid.SetColumnSpan($setNetworkHostnameCheck, 2)
+    $deviceSettingsGrid.Controls.Add((New-RowLabel "Network hostname"), 0, 8)
+    $deviceSettingsGrid.Controls.Add($networkHostnameBox, 1, 8)
+    $deviceSettingsGrid.SetColumnSpan($networkHostnameBox, 2)
+    $deviceSettingsGrid.Controls.Add((New-RowLabel "Domain"), 0, 9)
+    $deviceSettingsGrid.Controls.Add($domainBox, 1, 9)
+    $deviceSettingsGrid.SetColumnSpan($domainBox, 2)
+    $deviceSettingsGrid.Controls.Add((New-RowLabel "Custom domain"), 0, 10)
+    $deviceSettingsGrid.Controls.Add($customDomainBox, 1, 10)
+    $deviceSettingsGrid.SetColumnSpan($customDomainBox, 2)
+    $deviceSettingsGrid.Controls.Add((New-RowLabel "mDNS"), 0, 11)
+    $deviceSettingsGrid.Controls.Add($mdnsBox, 1, 11)
+    $deviceSettingsGrid.SetColumnSpan($mdnsBox, 2)
+    $deviceSettingsGrid.Controls.Add((New-RowLabel "IPv6 mode"), 0, 12)
+    $deviceSettingsGrid.Controls.Add($ipv6Box, 1, 12)
+    $deviceSettingsGrid.SetColumnSpan($ipv6Box, 2)
+    $deviceSettingsGrid.Controls.Add($deviceSettingsNote, 0, 14)
+    $deviceSettingsGrid.SetColumnSpan($deviceSettingsNote, 2)
+    $deviceSettingsGrid.Controls.Add($applyDeviceSettingsButton, 2, 15)
+    $settingsLayout.Controls.Add($deviceSettingsGroup, 0, 1)
 
     $logPanel = [Windows.Forms.TableLayoutPanel]::new()
     $logPanel.Dock = "Fill"
@@ -2746,6 +3113,7 @@ Status log
         $scanThisPcButton.Enabled = -not $Busy
         $applyEdidButton.Enabled = (-not $Busy) -and $displayChoiceBox.Enabled -and ($null -ne $displayChoiceBox.SelectedItem)
         $applyUsbButton.Enabled = (-not $Busy) -and $usbChoiceBox.Enabled -and ($null -ne $usbChoiceBox.SelectedItem)
+        $applyDeviceSettingsButton.Enabled = -not $Busy
         $statusLabel.Text = $Status
         [Windows.Forms.Application]::DoEvents()
     }
@@ -2812,6 +3180,107 @@ Status log
         if ($dialog.ShowDialog() -eq [Windows.Forms.DialogResult]::OK) {
             $localInstallerPathBox.Text = $dialog.FileName
             $installerSourceBox.SelectedItem = "Local file"
+        }
+    })
+    $setNetworkHostnameCheck.Add_CheckedChanged({
+        $networkHostnameBox.Enabled = $setNetworkHostnameCheck.Checked
+    })
+    $domainBox.Add_SelectedIndexChanged({
+        $customDomainBox.Enabled = ((Get-SelectedOptionValue $domainBox) -eq "custom")
+    })
+    $normalisingNetworkHostname = $false
+    $networkHostnameBox.Add_TextChanged({
+        if ($normalisingNetworkHostname) { return }
+        $current = $networkHostnameBox.Text
+        $clean = ConvertTo-TailscaleHostname -Value $current
+        if ($current -cne $clean) {
+            $normalisingNetworkHostname = $true
+            $cursor = [Math]::Min($networkHostnameBox.SelectionStart, $clean.Length)
+            $networkHostnameBox.Text = $clean
+            $networkHostnameBox.SelectionStart = $cursor
+            $normalisingNetworkHostname = $false
+        }
+    })
+    $customDomainBox.Add_TextChanged({
+        $current = $customDomainBox.Text
+        $clean = $current.Trim().ToLowerInvariant()
+        $clean = [regex]::Replace($clean, '[^a-z0-9.-]+', '-')
+        $clean = [regex]::Replace($clean, '-{2,}', '-')
+        if ($current -cne $clean) {
+            $cursor = [Math]::Min($customDomainBox.SelectionStart, $clean.Length)
+            $customDomainBox.Text = $clean
+            $customDomainBox.SelectionStart = $cursor
+        }
+    })
+    $applyDeviceSettingsButton.Add_Click({
+        try {
+            $ip = $ipBox.Text.Trim()
+            $keyPath = $keyBox.Text.Trim()
+            Assert-ValidIpOrHost -Value $ip
+            if ([string]::IsNullOrWhiteSpace($keyPath)) { throw "Choose the SSH private key path before applying JetKVM settings." }
+
+            $networkHostname = ""
+            if ($setNetworkHostnameCheck.Checked) {
+                $networkHostname = ConvertTo-TailscaleHostname -Value $networkHostnameBox.Text
+                Assert-TailscaleHostname -Value $networkHostname
+                if ([string]::IsNullOrWhiteSpace($networkHostname)) { throw "Network hostname is enabled but empty." }
+                if ($networkHostnameBox.Text -cne $networkHostname) { $networkHostnameBox.Text = $networkHostname }
+            }
+
+            $domain = [string](Get-SelectedOptionValue $domainBox)
+            if ($domain -eq "custom") {
+                $domain = $customDomainBox.Text.Trim().ToLowerInvariant()
+                Assert-JetKvmDomain -Value $domain
+                $customDomainBox.Text = $domain
+            }
+
+            $summary = @(
+                "Auto update: " + $(if ($disableAutoUpdateCheck.Checked) { "disabled" } else { "enabled" }),
+                "Keyboard layout: $(Get-SelectedOptionValue $keyboardLayoutBox)",
+                "Display brightness: $(Get-SelectedOptionValue $displayBrightnessBox)",
+                "Dim display after: $(Get-SelectedOptionValue $dimDisplayBox)s",
+                "Turn off display after: $(Get-SelectedOptionValue $offDisplayBox)s",
+                "HDMI sleep mode: $(Get-SelectedOptionValue $hdmiSleepBox)",
+                "Domain: $domain",
+                "mDNS: $(Get-SelectedOptionValue $mdnsBox)",
+                "IPv6 mode: $(Get-SelectedOptionValue $ipv6Box)"
+            )
+            if ($setNetworkHostnameCheck.Checked) { $summary += "Network hostname: $networkHostname" }
+
+            $answer = [Windows.Forms.MessageBox]::Show(
+                "Apply these JetKVM device settings?`r`n`r`n$($summary -join "`r`n")`r`n`r`nJetFUEL will back up /userdata/kvm_config.json, write the settings, then offer to reboot.",
+                "Apply JetKVM settings",
+                "YesNo",
+                "Warning"
+            )
+            if ($answer -ne [Windows.Forms.DialogResult]::Yes) {
+                & $log "JetKVM settings apply cancelled."
+                return
+            }
+
+            & $setBusy $true "Applying JetKVM settings..."
+            Update-JetKvmDeviceSettings `
+                -JetKvmAddress $ip `
+                -KeyPath $keyPath `
+                -AutoUpdateEnabled (-not $disableAutoUpdateCheck.Checked) `
+                -KeyboardLayout ([string](Get-SelectedOptionValue $keyboardLayoutBox)) `
+                -DisplayMaxBrightness ([int](Get-SelectedOptionValue $displayBrightnessBox)) `
+                -DisplayDimAfterSec ([int](Get-SelectedOptionValue $dimDisplayBox)) `
+                -DisplayOffAfterSec ([int](Get-SelectedOptionValue $offDisplayBox)) `
+                -VideoSleepAfterSec ([int](Get-SelectedOptionValue $hdmiSleepBox)) `
+                -SetNetworkHostname $setNetworkHostnameCheck.Checked `
+                -NetworkHostname $networkHostname `
+                -Domain $domain `
+                -MDNSMode ([string](Get-SelectedOptionValue $mdnsBox)) `
+                -IPv6Mode ([string](Get-SelectedOptionValue $ipv6Box)) `
+                -Log $log
+
+            & $log "JetKVM device settings saved."
+            & $rebootJetKvmAfterIdentity $ip $keyPath "JetKVM settings"
+        } catch {
+            & $log ("ERROR: " + $_.Exception.Message)
+            & $setBusy $false "Failed"
+            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null
         }
     })
     $openAction = {
@@ -3049,41 +3518,51 @@ echo '--- mac identity complete ---'
             $selectedUsbLabel.ForeColor = $ui.Muted
 
             & $log "--- this PC display EDID ---"
+            $edidPresets = @(Get-JetKvmEdidPresets)
+            foreach ($preset in $edidPresets) {
+                [void]$displayChoiceBox.Items.Add($preset)
+                & $log ("Display preset: {0}" -f $preset.DisplayName)
+            }
             $edids = @(Get-LocalDisplayEdidRecords)
             if ($edids.Count -eq 0) {
                 & $log "Warning: no local monitor EDID records were found."
-                $edidStatusLabel.Text = "Display EDID: none found"
+                $edidStatusLabel.Text = "Display EDID: JetKVM presets loaded; no local monitor EDID found"
                 $edidStatusLabel.ForeColor = $ui.Warn
             } else {
-                $edidStatusLabel.Text = "Display EDID: found $($edids.Count) record(s); choose one below"
+                $edidStatusLabel.Text = "Display EDID: $($edidPresets.Count) JetKVM preset(s) plus $($edids.Count) local record(s)"
                 $edidStatusLabel.ForeColor = $ui.Good
                 foreach ($edid in $edids) {
                     [void]$displayChoiceBox.Items.Add($edid)
                     $previewLength = [Math]::Min(96, $edid.Hex.Length)
                     & $log ("Display option: {0}; EDID {1} bytes: {2}..." -f $edid.DisplayName, $edid.Bytes, $edid.Hex.Substring(0, $previewLength))
                 }
-                $displayChoiceBox.Enabled = $true
-                $displayChoiceBox.DropDownWidth = [Math]::Max($displayChoiceBox.Width, (S 760))
-                $displayChoiceBox.SelectedIndex = 0
             }
+            $displayChoiceBox.Enabled = ($displayChoiceBox.Items.Count -gt 0)
+            $displayChoiceBox.DropDownWidth = [Math]::Max($displayChoiceBox.Width, (S 900))
+            if ($displayChoiceBox.Items.Count -gt 0) { $displayChoiceBox.SelectedIndex = 0 }
 
             & $log "--- this PC USB input candidates ---"
+            $usbPresets = @(Get-JetKvmUsbIdentityPresets)
+            foreach ($preset in $usbPresets) {
+                [void]$usbChoiceBox.Items.Add($preset)
+                & $log ("USB preset: {0}" -f $preset.DisplayName)
+            }
             $usbDevices = @(Get-LocalUsbInputDevices)
             if ($usbDevices.Count -eq 0) {
                 & $log "Warning: no local USB keyboard/mouse/HID VID/PID candidates were found."
-                $usbStatusLabel.Text = "USB input devices: none found"
+                $usbStatusLabel.Text = "USB identity: JetKVM presets loaded; no local USB input candidates found"
                 $usbStatusLabel.ForeColor = $ui.Warn
             } else {
-                $usbStatusLabel.Text = "USB input devices: found $($usbDevices.Count) unique candidate(s); choose one below"
+                $usbStatusLabel.Text = "USB identity: $($usbPresets.Count) JetKVM preset(s) plus $($usbDevices.Count) local candidate(s)"
                 $usbStatusLabel.ForeColor = $ui.Good
                 foreach ($device in $usbDevices) {
                     [void]$usbChoiceBox.Items.Add($device)
                     & $log ("USB option: {0}" -f $device.DisplayName)
                 }
-                $usbChoiceBox.Enabled = $true
-                $usbChoiceBox.DropDownWidth = [Math]::Max($usbChoiceBox.Width, (S 860))
-                $usbChoiceBox.SelectedIndex = 0
             }
+            $usbChoiceBox.Enabled = ($usbChoiceBox.Items.Count -gt 0)
+            $usbChoiceBox.DropDownWidth = [Math]::Max($usbChoiceBox.Width, (S 900))
+            if ($usbChoiceBox.Items.Count -gt 0) { $usbChoiceBox.SelectedIndex = 0 }
             & $log "Identity scan complete. Choose an item from each dropdown, then use Apply EDID or Apply USB when ready."
             & $setBusy $false "Identity scan complete"
         } catch {
@@ -3116,11 +3595,11 @@ echo '--- mac identity complete ---'
 
     $applyEdidButton.Add_Click({
         try {
-            if (-not $displayChoiceBox.SelectedItem) { throw "Scan this PC identity and select a display EDID first." }
+            if (-not $displayChoiceBox.SelectedItem) { throw "Select a display EDID first." }
             $item = $displayChoiceBox.SelectedItem
             $edid = Assert-EdidHex -Hex $item.Hex
             $answer = [Windows.Forms.MessageBox]::Show(
-                "Apply this display EDID to the JetKVM?`r`n`r`n$($item.DisplayName)`r`n`r`nJetFUEL will back up /userdata/kvm_config.json, write hdmi_edid_string, then offer to reboot.",
+                "Apply this display EDID to the JetKVM?`r`n`r`n$($item.DisplayName)`r`n`r`nJetFUEL will back up /userdata/kvm_config.json, write the EDID hex/file content to hdmi_edid_string, then offer to reboot.",
                 "Apply JetKVM EDID",
                 "YesNo",
                 "Warning"
@@ -3146,7 +3625,7 @@ echo '--- mac identity complete ---'
 
     $applyUsbButton.Add_Click({
         try {
-            if (-not $usbChoiceBox.SelectedItem) { throw "Scan this PC identity and select a USB identity first." }
+            if (-not $usbChoiceBox.SelectedItem) { throw "Select a USB identity first." }
             $item = $usbChoiceBox.SelectedItem
             $usbConfig = ConvertTo-JetKvmUsbConfig -Device $item
             $answer = [Windows.Forms.MessageBox]::Show(

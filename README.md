@@ -49,8 +49,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\JetFuel.ps1
 - Checks and repairs the JetKVM Tailscale boot hook at `/userdata/init.d/S22tailscale`.
 - Keeps colour-coded logs and a copy-log button.
 - Provides an Identity tab for JetKVM MAC status, generated local-administered MAC profiles, custom MAC override, and clearing the user override.
-- Scans the Windows PC for monitor EDID and USB keyboard/mouse VID/PID candidates, then lets you choose human-readable display and USB identity candidates.
+- Loads JetKVM's default EDID/USB identity presets, scans the Windows PC for monitor EDID and USB keyboard/mouse VID/PID candidates, then lets you choose human-readable display and USB identity candidates.
 - Applies selected EDID and USB identity values to JetKVM by backing up and updating `/userdata/kvm_config.json` over SSH, then offering to reboot JetKVM so the values load.
+- Applies optional JetKVM device defaults for auto update, keyboard layout, display brightness/timers, HDMI sleep, network hostname/domain, mDNS, and IPv6 mode.
 
 ## EDID And USB Identity
 
@@ -58,8 +59,8 @@ JetFUEL can scan the Windows machine running the wizard for monitor EDID records
 
 On the Identity tab:
 
-- `Scan PC` reads local monitor EDID and USB input candidates.
-- `Apply EDID` writes the selected EDID to JetKVM's `hdmi_edid_string` config value.
+- `Scan PC` loads JetKVM's built-in EDID/USB presets, then reads local monitor EDID and USB input candidates.
+- `Apply EDID` writes the selected EDID hex content to JetKVM's `hdmi_edid_string` config value. This is the same content JetKVM's web UI labels as `EDID File`.
 - `Apply USB` writes the selected VID/PID/manufacturer/product to JetKVM's `usb_config` value.
 
 Both apply actions create a timestamped backup of `/userdata/kvm_config.json` first, then offer to reboot JetKVM so the KVM service reloads the setting.
@@ -106,6 +107,19 @@ Custom scripts must keep the same command-line contract:
 ```
 
 They must install/configure Tailscale on the JetKVM, handle reboot/return, and print any Tailscale login URL.
+
+## JetKVM Device Settings
+
+The Settings tab can apply a small set of JetKVM config-backed defaults by editing `/userdata/kvm_config.json` over SSH and then offering to reboot the JetKVM.
+
+Current settings include:
+
+- General: auto update enabled/disabled.
+- Keyboard: English (UK) or English (US) keyboard layout.
+- Hardware: display brightness, dim timer, off timer, and HDMI sleep mode.
+- Network: optional hostname, domain mode, mDNS mode, and IPv6 mode.
+
+JetFUEL does not currently set the local JetKVM password. Use JetKVM Settings > Access for that flow. JetKVM's Hide Header and Hide Status Bar options are browser UI preferences, not device config values, so JetFUEL does not push them globally over SSH.
 
 ## Tailscale Auth Key Notes
 
