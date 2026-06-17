@@ -183,6 +183,8 @@ Recommended JetFUEL behaviour:
 Current JetFUEL implementation:
 
 - `Scan this PC identity` logs local monitor EDID records and USB keyboard/mouse/HID VID/PID candidates.
+- Scan results are also shown in dropdowns using human-readable names where Windows exposes them.
+- The selected display EDID and USB identity candidate are kept in the wizard state for the current run.
 - Applying EDID/USB identity to JetKVM is not wired yet. The next step is testing the JetKVM JSON-RPC route or a safe config-file apply path for `/userdata/kvm_config.json`.
 
 Windows capture options:

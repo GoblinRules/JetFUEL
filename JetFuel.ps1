@@ -759,15 +759,75 @@ function New-MacAddressFromProfile {
     return ("{0:X2}:{1:X2}:{2:X2}:{3:X2}:{4:X2}:{5:X2}" -f $bytes)
 }
 
+function ConvertFrom-WmiMonitorString {
+    param($Value)
+
+    if (-not $Value) { return "" }
+    $chars = New-Object System.Collections.Generic.List[char]
+    foreach ($code in $Value) {
+        if ([int]$code -eq 0) { continue }
+        $chars.Add([char][int]$code)
+    }
+    return (-join $chars).Trim()
+}
+
+function Get-DisplayInstanceKeyFromPath {
+    param([AllowEmptyString()][string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) { return "" }
+    $match = [regex]::Match($Path, 'DISPLAY\\([^\\]+)\\([^\\]+)\\Device Parameters', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if (-not $match.Success) { return "" }
+    return ("DISPLAY\{0}\{1}" -f $match.Groups[1].Value, $match.Groups[2].Value).ToUpperInvariant()
+}
+
 function Get-LocalDisplayEdidRecords {
     $records = New-Object System.Collections.Generic.List[object]
+    $monitorMap = @{}
+    try {
+        $monitors = Get-CimInstance -Namespace root\wmi -ClassName WmiMonitorID -ErrorAction SilentlyContinue
+        foreach ($monitor in $monitors) {
+            $instance = ([string]$monitor.InstanceName -replace '_\d+$', '').ToUpperInvariant()
+            $monitorMap[$instance] = [pscustomobject]@{
+                FriendlyName = ConvertFrom-WmiMonitorString -Value $monitor.UserFriendlyName
+                Manufacturer = ConvertFrom-WmiMonitorString -Value $monitor.ManufacturerName
+                Serial = ConvertFrom-WmiMonitorString -Value $monitor.SerialNumberID
+                ProductCode = ConvertFrom-WmiMonitorString -Value $monitor.ProductCodeID
+            }
+        }
+    } catch {}
+
     try {
         $items = Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Enum\DISPLAY\*\*\Device Parameters' -ErrorAction SilentlyContinue |
             Where-Object { $_.EDID }
         foreach ($item in $items) {
             $bytes = [byte[]]$item.EDID
             $hex = (($bytes | ForEach-Object { "{0:X2}" -f $_ }) -join "")
+            $instanceKey = Get-DisplayInstanceKeyFromPath -Path $item.PSPath
+            $monitorInfo = if ($monitorMap.ContainsKey($instanceKey)) { $monitorMap[$instanceKey] } else { $null }
+            $displayName = if ($monitorInfo -and -not [string]::IsNullOrWhiteSpace($monitorInfo.FriendlyName)) {
+                $monitorInfo.FriendlyName
+            } elseif (-not [string]::IsNullOrWhiteSpace($instanceKey)) {
+                $instanceKey
+            } else {
+                "Monitor EDID"
+            }
+            $details = @()
+            if ($monitorInfo -and -not [string]::IsNullOrWhiteSpace($monitorInfo.Manufacturer)) { $details += $monitorInfo.Manufacturer }
+            if ($monitorInfo -and -not [string]::IsNullOrWhiteSpace($monitorInfo.ProductCode)) { $details += "Product $($monitorInfo.ProductCode)" }
+            if ($monitorInfo -and -not [string]::IsNullOrWhiteSpace($monitorInfo.Serial)) { $details += "Serial $($monitorInfo.Serial)" }
+            $detailText = ($details -join ", ")
+            $displayText = if ([string]::IsNullOrWhiteSpace($detailText)) {
+                "$displayName ($($bytes.Length) bytes)"
+            } else {
+                "$displayName - $detailText ($($bytes.Length) bytes)"
+            }
             $records.Add([pscustomobject]@{
+                DisplayName = $displayText
+                Name = $displayName
+                Manufacturer = if ($monitorInfo) { $monitorInfo.Manufacturer } else { "" }
+                Serial = if ($monitorInfo) { $monitorInfo.Serial } else { "" }
+                ProductCode = if ($monitorInfo) { $monitorInfo.ProductCode } else { "" }
+                InstanceKey = $instanceKey
                 Source = $item.PSPath
                 Bytes = $bytes.Length
                 Hex = $hex
@@ -779,6 +839,7 @@ function Get-LocalDisplayEdidRecords {
 
 function Get-LocalUsbInputDevices {
     $devices = New-Object System.Collections.Generic.List[object]
+    $seen = @{}
     try {
         $items = Get-CimInstance Win32_PnPEntity -ErrorAction SilentlyContinue |
             Where-Object {
@@ -788,12 +849,22 @@ function Get-LocalUsbInputDevices {
         foreach ($item in $items) {
             $match = [regex]::Match($item.PNPDeviceID, 'VID_([0-9A-Fa-f]{4})&PID_([0-9A-Fa-f]{4})')
             if ($match.Success) {
+                $name = if ([string]::IsNullOrWhiteSpace($item.Name)) { "USB input device" } else { [string]$item.Name }
+                $manufacturer = if ([string]::IsNullOrWhiteSpace($item.Manufacturer)) { "Unknown manufacturer" } else { [string]$item.Manufacturer }
+                $class = if ([string]::IsNullOrWhiteSpace($item.PNPClass)) { "HIDClass" } else { [string]$item.PNPClass }
+                $vendorId = "0x" + $match.Groups[1].Value.ToLowerInvariant()
+                $productId = "0x" + $match.Groups[2].Value.ToLowerInvariant()
+                $dedupeKey = ("{0}|{1}|{2}|{3}|{4}" -f $vendorId, $productId, $class, $manufacturer, $name).ToUpperInvariant()
+                if ($seen.ContainsKey($dedupeKey)) { continue }
+                $seen[$dedupeKey] = $true
+                $displayName = "{0}:{1} [{2}] {3} - {4}" -f $vendorId, $productId, $class, $manufacturer, $name
                 $devices.Add([pscustomobject]@{
-                    Name = $item.Name
-                    Manufacturer = $item.Manufacturer
-                    Class = $item.PNPClass
-                    VendorId = ("0x" + $match.Groups[1].Value.ToLowerInvariant())
-                    ProductId = ("0x" + $match.Groups[2].Value.ToLowerInvariant())
+                    DisplayName = $displayName
+                    Name = $name
+                    Manufacturer = $manufacturer
+                    Class = $class
+                    VendorId = $vendorId
+                    ProductId = $productId
                     PnpDeviceId = $item.PNPDeviceID
                 })
             }
@@ -1871,7 +1942,8 @@ Identity tab
 - Network MAC identity lets you read the active JetKVM MAC, write a generated/custom user override, or clear the user override.
 - MAC profile choices are local-administered generated addresses. They are labels for organization; JetFUEL does not clone this PC MAC and does not use real third-party vendor OUIs by default.
 - Applying or clearing a MAC override needs a JetKVM reboot before Ethernet uses the new value.
-- Scan this PC identity logs connected monitor EDID data and local USB input VID/PID candidates for future EDID/USB identity work.
+- Scan this PC identity lists connected monitor EDID records and local USB input VID/PID candidates.
+- If several display or USB candidates are found, choose the one you want from the dropdowns. These selections are kept for this wizard run and will be used by the future EDID/USB apply workflow.
 
 Settings tab
 - Custom script URL is only used when Step 3 is set to Custom URL.
@@ -2238,20 +2310,40 @@ Status log
 
     $identityScanGroup = New-Group "Display and USB identity"
     & $makeGroupAutoHeight $identityScanGroup
-    $identityScanGrid = New-StepGrid 5
+    $identityScanGrid = New-StepGrid 9
     $identityScanGrid.RowStyles.Clear()
-    foreach ($height in @(32, 28, 28, 28, 38)) {
+    foreach ($height in @(40, 24, 30, 24, 24, 30, 24, 30, 38)) {
         $identityScanGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, (S $height))) | Out-Null
     }
     $identityScanGroup.Controls.Add($identityScanGrid)
     $identityScanIntro = [Windows.Forms.Label]::new()
-    $identityScanIntro.Text = "Next identity work: EDID presets/custom EDID and USB keyboard/mouse adapter identity. For now this can scan the Windows PC and log monitor EDID plus USB VID/PID candidates."
+    $identityScanIntro.Text = "Scan this Windows PC, then choose which local monitor EDID and USB input identity should be used later for JetKVM display/USB identity work."
     $identityScanIntro.Dock = "Fill"
     $identityScanIntro.ForeColor = $ui.Muted
     $identityScanIntro.Font = [Drawing.Font]::new("Segoe UI", 9)
     $edidStatusLabel = New-RowLabel "Display EDID: not scanned"
     $usbStatusLabel = New-RowLabel "USB input devices: not scanned"
-    $identityNote = New-RowLabel "Applying EDID/USB identity to JetKVM will be added after the JetKVM RPC/config path is tested."
+    $selectedDisplayLabel = New-RowLabel "Selected display: none"
+    $selectedUsbLabel = New-RowLabel "Selected USB identity: none"
+    $identityNote = New-RowLabel "Selections are saved in the wizard state for this run. Applying them to JetKVM will be added after the JetKVM RPC/config path is tested."
+    $displayChoiceBox = [Windows.Forms.ComboBox]::new()
+    $displayChoiceBox.Dock = "Fill"
+    $displayChoiceBox.DropDownStyle = [Windows.Forms.ComboBoxStyle]::DropDownList
+    $displayChoiceBox.Margin = New-ScaledPadding 0 2 8 2
+    $displayChoiceBox.BackColor = $ui.Input
+    $displayChoiceBox.ForeColor = $ui.InputText
+    $displayChoiceBox.Font = [Drawing.Font]::new("Segoe UI", 9)
+    $displayChoiceBox.DisplayMember = "DisplayName"
+    $displayChoiceBox.Enabled = $false
+    $usbChoiceBox = [Windows.Forms.ComboBox]::new()
+    $usbChoiceBox.Dock = "Fill"
+    $usbChoiceBox.DropDownStyle = [Windows.Forms.ComboBoxStyle]::DropDownList
+    $usbChoiceBox.Margin = New-ScaledPadding 0 2 8 2
+    $usbChoiceBox.BackColor = $ui.Input
+    $usbChoiceBox.ForeColor = $ui.InputText
+    $usbChoiceBox.Font = [Drawing.Font]::new("Segoe UI", 9)
+    $usbChoiceBox.DisplayMember = "DisplayName"
+    $usbChoiceBox.Enabled = $false
     $scanThisPcButton = [Windows.Forms.Button]::new()
     $scanThisPcButton.Text = "Scan this PC identity"
     $scanThisPcButton.Dock = "Fill"
@@ -2261,11 +2353,21 @@ Status log
     $identityScanGrid.SetColumnSpan($identityScanIntro, 3)
     $identityScanGrid.Controls.Add($edidStatusLabel, 0, 1)
     $identityScanGrid.SetColumnSpan($edidStatusLabel, 3)
-    $identityScanGrid.Controls.Add($usbStatusLabel, 0, 2)
+    $identityScanGrid.Controls.Add((New-RowLabel "Display EDID to use"), 0, 2)
+    $identityScanGrid.Controls.Add($displayChoiceBox, 1, 2)
+    $identityScanGrid.SetColumnSpan($displayChoiceBox, 2)
+    $identityScanGrid.Controls.Add($selectedDisplayLabel, 1, 3)
+    $identityScanGrid.SetColumnSpan($selectedDisplayLabel, 2)
+    $identityScanGrid.Controls.Add($usbStatusLabel, 0, 4)
     $identityScanGrid.SetColumnSpan($usbStatusLabel, 3)
-    $identityScanGrid.Controls.Add($identityNote, 0, 3)
+    $identityScanGrid.Controls.Add((New-RowLabel "USB identity to use"), 0, 5)
+    $identityScanGrid.Controls.Add($usbChoiceBox, 1, 5)
+    $identityScanGrid.SetColumnSpan($usbChoiceBox, 2)
+    $identityScanGrid.Controls.Add($selectedUsbLabel, 1, 6)
+    $identityScanGrid.SetColumnSpan($selectedUsbLabel, 2)
+    $identityScanGrid.Controls.Add($identityNote, 0, 7)
     $identityScanGrid.SetColumnSpan($identityNote, 3)
-    $identityScanGrid.Controls.Add($scanThisPcButton, 2, 4)
+    $identityScanGrid.Controls.Add($scanThisPcButton, 2, 8)
     $identityLayout.Controls.Add($identityScanGroup, 0, 1)
 
     $settingsGroup = New-Group "Settings"
@@ -2647,9 +2749,34 @@ echo '--- mac identity complete ---'
         }
     })
 
+    $displayChoiceBox.Add_SelectedIndexChanged({
+        if ($displayChoiceBox.SelectedItem) {
+            $item = $displayChoiceBox.SelectedItem
+            $selectedDisplayLabel.Text = "Selected display: $($item.DisplayName)"
+            $selectedDisplayLabel.ForeColor = $ui.Good
+        }
+    })
+
+    $usbChoiceBox.Add_SelectedIndexChanged({
+        if ($usbChoiceBox.SelectedItem) {
+            $item = $usbChoiceBox.SelectedItem
+            $selectedUsbLabel.Text = "Selected USB identity: $($item.DisplayName)"
+            $selectedUsbLabel.ForeColor = $ui.Good
+        }
+    })
+
     $scanThisPcButton.Add_Click({
         try {
             & $setBusy $true "Scanning this PC identity..."
+            $displayChoiceBox.Items.Clear()
+            $displayChoiceBox.Enabled = $false
+            $selectedDisplayLabel.Text = "Selected display: none"
+            $selectedDisplayLabel.ForeColor = $ui.Muted
+            $usbChoiceBox.Items.Clear()
+            $usbChoiceBox.Enabled = $false
+            $selectedUsbLabel.Text = "Selected USB identity: none"
+            $selectedUsbLabel.ForeColor = $ui.Muted
+
             & $log "--- this PC display EDID ---"
             $edids = @(Get-LocalDisplayEdidRecords)
             if ($edids.Count -eq 0) {
@@ -2657,12 +2784,16 @@ echo '--- mac identity complete ---'
                 $edidStatusLabel.Text = "Display EDID: none found"
                 $edidStatusLabel.ForeColor = $ui.Warn
             } else {
-                $edidStatusLabel.Text = "Display EDID: found $($edids.Count) record(s)"
+                $edidStatusLabel.Text = "Display EDID: found $($edids.Count) record(s); choose one below"
                 $edidStatusLabel.ForeColor = $ui.Good
-                foreach ($edid in ($edids | Select-Object -First 5)) {
+                foreach ($edid in $edids) {
+                    [void]$displayChoiceBox.Items.Add($edid)
                     $previewLength = [Math]::Min(96, $edid.Hex.Length)
-                    & $log ("EDID {0} bytes: {1}..." -f $edid.Bytes, $edid.Hex.Substring(0, $previewLength))
+                    & $log ("Display option: {0}; EDID {1} bytes: {2}..." -f $edid.DisplayName, $edid.Bytes, $edid.Hex.Substring(0, $previewLength))
                 }
+                $displayChoiceBox.Enabled = $true
+                $displayChoiceBox.DropDownWidth = [Math]::Max($displayChoiceBox.Width, (S 760))
+                $displayChoiceBox.SelectedIndex = 0
             }
 
             & $log "--- this PC USB input candidates ---"
@@ -2672,13 +2803,17 @@ echo '--- mac identity complete ---'
                 $usbStatusLabel.Text = "USB input devices: none found"
                 $usbStatusLabel.ForeColor = $ui.Warn
             } else {
-                $usbStatusLabel.Text = "USB input devices: found $($usbDevices.Count) candidate(s)"
+                $usbStatusLabel.Text = "USB input devices: found $($usbDevices.Count) unique candidate(s); choose one below"
                 $usbStatusLabel.ForeColor = $ui.Good
-                foreach ($device in ($usbDevices | Select-Object -First 12)) {
-                    & $log ("USB {0}:{1} [{2}] {3} - {4}" -f $device.VendorId, $device.ProductId, $device.Class, $device.Manufacturer, $device.Name)
+                foreach ($device in $usbDevices) {
+                    [void]$usbChoiceBox.Items.Add($device)
+                    & $log ("USB option: {0}" -f $device.DisplayName)
                 }
+                $usbChoiceBox.Enabled = $true
+                $usbChoiceBox.DropDownWidth = [Math]::Max($usbChoiceBox.Width, (S 860))
+                $usbChoiceBox.SelectedIndex = 0
             }
-            & $log "Identity scan complete. EDID/USB apply controls will be added once the JetKVM RPC/config path is tested."
+            & $log "Identity scan complete. Use the dropdowns to choose the display EDID and USB identity candidate for this run."
             & $setBusy $false "Identity scan complete"
         } catch {
             & $log ("ERROR: " + $_.Exception.Message)
