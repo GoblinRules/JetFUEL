@@ -22,6 +22,8 @@ The three areas are separate:
 - BSD Hardware EDID catalogue: https://github.com/bsdhw/EDID
 - BSD Hardware trends: https://bsd-hardware.info/?view=trends
 - EDID reference site: https://edid.tv/
+- MACLookup API documentation: https://maclookup.app/api-v2/documentation
+- MACLookup downloadable database: https://maclookup.app/downloads/json-database
 
 Source snapshots checked:
 
@@ -57,12 +59,31 @@ Recommended JetFUEL behaviour:
 
 Do not automatically clone the Windows installer's MAC address. Duplicate MAC addresses on the same LAN cause network conflicts. If a user explicitly wants a cloned MAC, treat that as an expert-only manual custom value with a warning.
 
+Current JetFUEL implementation:
+
+- Adds an `Identity` tab.
+- Reads the active JetKVM MAC and user/system MAC files over SSH.
+- Generates local-administered MACs for these profiles:
+  - JetFUEL generated
+  - Android / media
+  - Fire TV / streaming
+  - TP-Link smart plug / IoT
+  - Generic IoT
+- Allows a custom MAC value with stricter warnings when the value is not local-administered.
+- Writes the user override to `/userdata/jetkvm/mac_address`.
+- Clears `/userdata/jetkvm/mac_address` and legacy `/data/ethaddr.txt` when requested.
+- Prompts for JetKVM reboot because the active Ethernet MAC changes at network startup.
+
 Validation:
 
 - Require `XX:XX:XX:XX:XX:XX`.
 - Reject `00:00:00:00:00:00` and `FF:FF:FF:FF:FF:FF`.
 - Prefer locally administered generated addresses for new values.
 - Warn if the value does not have the locally administered bit set unless the user confirms it.
+
+MACLookup notes:
+
+MACLookup's API accepts full MAC addresses or prefixes and returns vendor details, block start/end, block size, block type, and random/private flags. The downloadable JSON/CSV databases are useful for future offline validation or optional vendor lookup. JetFUEL should not depend on the live API during normal setup because customer sites may not have internet access, and MAC generation should remain deterministic/offline.
 
 ## Display identity / EDID
 
@@ -158,6 +179,11 @@ Recommended JetFUEL behaviour:
 - Add `Use this PC USB device` to choose a detected keyboard, mouse, or unified receiver from Windows.
 - Add custom VID/PID/manufacturer/product fields for advanced users.
 - Add separate checkboxes for keyboard, absolute mouse, relative mouse, mass storage, serial console, and audio.
+
+Current JetFUEL implementation:
+
+- `Scan this PC identity` logs local monitor EDID records and USB keyboard/mouse/HID VID/PID candidates.
+- Applying EDID/USB identity to JetKVM is not wired yet. The next step is testing the JetKVM JSON-RPC route or a safe config-file apply path for `/userdata/kvm_config.json`.
 
 Windows capture options:
 

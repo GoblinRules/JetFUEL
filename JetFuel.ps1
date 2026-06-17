@@ -659,6 +659,149 @@ function ConvertTo-ShellSingleQuoted {
     return "'" + $Value.Replace("'", "'\''") + "'"
 }
 
+function Get-MacIdentityProfiles {
+    return @(
+        [pscustomobject]@{
+            Name = "JetFUEL generated (recommended)"
+            Prefix = @(0x02, 0x4A, 0x46)
+            Description = "Local-administered JetFUEL profile. Safe default."
+        },
+        [pscustomobject]@{
+            Name = "Android / media profile"
+            Prefix = @(0x02, 0x41, 0x4E)
+            Description = "Local-administered profile label for Android/media-style devices."
+        },
+        [pscustomobject]@{
+            Name = "Fire TV / streaming profile"
+            Prefix = @(0x02, 0x46, 0x54)
+            Description = "Local-administered profile label for streaming devices."
+        },
+        [pscustomobject]@{
+            Name = "TP-Link smart plug / IoT profile"
+            Prefix = @(0x02, 0x54, 0x50)
+            Description = "Local-administered profile label for IoT devices."
+        },
+        [pscustomobject]@{
+            Name = "Generic IoT profile"
+            Prefix = @(0x02, 0x10, 0x7E)
+            Description = "Local-administered profile label for generic IoT devices."
+        },
+        [pscustomobject]@{
+            Name = "Custom MAC"
+            Prefix = $null
+            Description = "Manual MAC value. Advanced users only."
+        }
+    )
+}
+
+function Format-MacAddress {
+    param([AllowEmptyString()][string]$Value)
+
+    if ([string]::IsNullOrWhiteSpace($Value)) { return "" }
+    $clean = ($Value.Trim() -replace '[^0-9A-Fa-f]', '').ToUpperInvariant()
+    if ($clean.Length -ne 12) { return $Value.Trim().ToUpperInvariant().Replace("-", ":") }
+
+    $parts = New-Object System.Collections.Generic.List[string]
+    for ($i = 0; $i -lt 12; $i += 2) {
+        $parts.Add($clean.Substring($i, 2))
+    }
+    return ($parts -join ":")
+}
+
+function Assert-MacAddress {
+    param([AllowEmptyString()][string]$MacAddress)
+
+    if ([string]::IsNullOrWhiteSpace($MacAddress)) {
+        throw "Enter or generate a MAC address first."
+    }
+    if ($MacAddress -notmatch '^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$') {
+        throw "MAC address must use XX:XX:XX:XX:XX:XX format."
+    }
+    $upper = $MacAddress.ToUpperInvariant()
+    if ($upper -eq "00:00:00:00:00:00" -or $upper -eq "FF:FF:FF:FF:FF:FF") {
+        throw "That MAC address is not valid for use on a network."
+    }
+    $firstOctet = [Convert]::ToInt32($upper.Substring(0, 2), 16)
+    if (($firstOctet -band 1) -ne 0) {
+        throw "The MAC address is multicast. Use a unicast MAC address."
+    }
+}
+
+function Test-MacAddressIsLocalAdministered {
+    param([Parameter(Mandatory)][string]$MacAddress)
+    $firstOctet = [Convert]::ToInt32($MacAddress.Substring(0, 2), 16)
+    return (($firstOctet -band 2) -ne 0)
+}
+
+function New-MacAddressFromProfile {
+    param([Parameter(Mandatory)]$Profile)
+
+    if (-not $Profile.Prefix) {
+        throw "Select a generated profile or type a custom MAC address."
+    }
+
+    $randomBytes = New-Object byte[] 3
+    $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $rng.GetBytes($randomBytes)
+    } finally {
+        $rng.Dispose()
+    }
+
+    $bytes = @(
+        [int]$Profile.Prefix[0],
+        [int]$Profile.Prefix[1],
+        [int]$Profile.Prefix[2],
+        [int]$randomBytes[0],
+        [int]$randomBytes[1],
+        [int]$randomBytes[2]
+    )
+    return ("{0:X2}:{1:X2}:{2:X2}:{3:X2}:{4:X2}:{5:X2}" -f $bytes)
+}
+
+function Get-LocalDisplayEdidRecords {
+    $records = New-Object System.Collections.Generic.List[object]
+    try {
+        $items = Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Enum\DISPLAY\*\*\Device Parameters' -ErrorAction SilentlyContinue |
+            Where-Object { $_.EDID }
+        foreach ($item in $items) {
+            $bytes = [byte[]]$item.EDID
+            $hex = (($bytes | ForEach-Object { "{0:X2}" -f $_ }) -join "")
+            $records.Add([pscustomobject]@{
+                Source = $item.PSPath
+                Bytes = $bytes.Length
+                Hex = $hex
+            })
+        }
+    } catch {}
+    return $records
+}
+
+function Get-LocalUsbInputDevices {
+    $devices = New-Object System.Collections.Generic.List[object]
+    try {
+        $items = Get-CimInstance Win32_PnPEntity -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.PNPDeviceID -match 'VID_([0-9A-Fa-f]{4})&PID_([0-9A-Fa-f]{4})' -and
+                ($_.PNPClass -in @("Keyboard", "Mouse", "HIDClass"))
+            }
+        foreach ($item in $items) {
+            $match = [regex]::Match($item.PNPDeviceID, 'VID_([0-9A-Fa-f]{4})&PID_([0-9A-Fa-f]{4})')
+            if ($match.Success) {
+                $devices.Add([pscustomobject]@{
+                    Name = $item.Name
+                    Manufacturer = $item.Manufacturer
+                    Class = $item.PNPClass
+                    VendorId = ("0x" + $match.Groups[1].Value.ToLowerInvariant())
+                    ProductId = ("0x" + $match.Groups[2].Value.ToLowerInvariant())
+                    PnpDeviceId = $item.PNPDeviceID
+                })
+            }
+        }
+    } catch {}
+    return $devices
+}
+
 function Assert-TailscaleAuthKeyLooksUsable {
     param([AllowEmptyString()][string]$AuthKey)
 
@@ -1552,9 +1695,9 @@ function Start-JetFuelGuiV2 {
     $navPanel = [Windows.Forms.TableLayoutPanel]::new()
     $navPanel.Dock = "Fill"
     $navPanel.BackColor = $ui.Window
-    $navPanel.ColumnCount = 5
+    $navPanel.ColumnCount = 6
     $navPanel.RowCount = 1
-    foreach ($width in @(122, 122, 122, 122)) {
+    foreach ($width in @(122, 122, 122, 122, 122)) {
         $navPanel.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, (S $width))) | Out-Null
     }
     $navPanel.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
@@ -1567,6 +1710,10 @@ function Start-JetFuelGuiV2 {
     $tailscaleTabButton.Text = "Tailscale"
     $tailscaleTabButton.Dock = "Fill"
     $tailscaleTabButton.Margin = New-ScaledPadding 0 0 4 0
+    $identityTabButton = [Windows.Forms.Button]::new()
+    $identityTabButton.Text = "Identity"
+    $identityTabButton.Dock = "Fill"
+    $identityTabButton.Margin = New-ScaledPadding 0 0 4 0
     $settingsTabButton = [Windows.Forms.Button]::new()
     $settingsTabButton.Text = "Settings"
     $settingsTabButton.Dock = "Fill"
@@ -1577,12 +1724,14 @@ function Start-JetFuelGuiV2 {
     $helpTabButton.Margin = New-ScaledPadding 0 0 4 0
     Set-ButtonStyle $setupTabButton "Primary"
     Set-ButtonStyle $tailscaleTabButton "Secondary"
+    Set-ButtonStyle $identityTabButton "Secondary"
     Set-ButtonStyle $settingsTabButton "Secondary"
     Set-ButtonStyle $helpTabButton "Secondary"
     $navPanel.Controls.Add($setupTabButton, 0, 0)
     $navPanel.Controls.Add($tailscaleTabButton, 1, 0)
-    $navPanel.Controls.Add($settingsTabButton, 2, 0)
-    $navPanel.Controls.Add($helpTabButton, 3, 0)
+    $navPanel.Controls.Add($identityTabButton, 2, 0)
+    $navPanel.Controls.Add($settingsTabButton, 3, 0)
+    $navPanel.Controls.Add($helpTabButton, 4, 0)
 
     $pageHost = [Windows.Forms.Panel]::new()
     $pageHost.Dock = "Fill"
@@ -1595,6 +1744,10 @@ function Start-JetFuelGuiV2 {
     $tailscalePage = [Windows.Forms.Panel]::new()
     $tailscalePage.Dock = "Fill"
     $tailscalePage.BackColor = $ui.Window
+    $identityPage = [Windows.Forms.Panel]::new()
+    $identityPage.Dock = "Fill"
+    $identityPage.BackColor = $ui.Window
+    $identityPage.AutoScroll = $true
     $settingsPage = [Windows.Forms.Panel]::new()
     $settingsPage.Dock = "Fill"
     $settingsPage.BackColor = $ui.Window
@@ -1645,6 +1798,18 @@ function Start-JetFuelGuiV2 {
     $settingsLayout.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
     $settingsLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
     $settingsPage.Controls.Add($settingsLayout)
+
+    $identityLayout = [Windows.Forms.TableLayoutPanel]::new()
+    $identityLayout.Dock = "Top"
+    $identityLayout.AutoSize = $true
+    $identityLayout.AutoSizeMode = [Windows.Forms.AutoSizeMode]::GrowAndShrink
+    $identityLayout.BackColor = $ui.Window
+    $identityLayout.ColumnCount = 1
+    $identityLayout.RowCount = 2
+    $identityLayout.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
+    $identityLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::AutoSize)) | Out-Null
+    $identityLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::AutoSize)) | Out-Null
+    $identityPage.Controls.Add($identityLayout)
 
     $helpBox = [Windows.Forms.RichTextBox]::new()
     $helpBox.Dock = "Fill"
@@ -1702,6 +1867,12 @@ Tailscale tab
 - Repair Tailscale recreates the JetKVM Tailscale boot hook, starts tailscaled if needed, then reruns tailscale up with the current auth key/hostname settings or opens the manual login URL when no auth key is used.
 - Remove Tailscale logs out where possible, stops Tailscale, removes /userdata/tailscale, and reboots the JetKVM.
 
+Identity tab
+- Network MAC identity lets you read the active JetKVM MAC, write a generated/custom user override, or clear the user override.
+- MAC profile choices are local-administered generated addresses. They are labels for organization; JetFUEL does not clone this PC MAC and does not use real third-party vendor OUIs by default.
+- Applying or clearing a MAC override needs a JetKVM reboot before Ethernet uses the new value.
+- Scan this PC identity logs connected monitor EDID data and local USB input VID/PID candidates for future EDID/USB identity work.
+
 Settings tab
 - Custom script URL is only used when Step 3 is set to Custom URL.
 - Local script file is only used when Step 3 is set to Local file.
@@ -1725,20 +1896,23 @@ Status log
 "@
     $helpPage.Controls.Add($helpBox)
 
-    $pageHost.Controls.AddRange(@($helpPage, $settingsPage, $tailscalePage, $setupPage))
+    $pageHost.Controls.AddRange(@($helpPage, $settingsPage, $identityPage, $tailscalePage, $setupPage))
     $showPage = {
         param([string]$Name)
         $setupPage.Visible = ($Name -eq "Setup")
         $tailscalePage.Visible = ($Name -eq "Tailscale")
+        $identityPage.Visible = ($Name -eq "Identity")
         $settingsPage.Visible = ($Name -eq "Settings")
         $helpPage.Visible = ($Name -eq "Help")
         Set-ButtonStyle $setupTabButton $(if ($Name -eq "Setup") { "Primary" } else { "Secondary" })
         Set-ButtonStyle $tailscaleTabButton $(if ($Name -eq "Tailscale") { "Primary" } else { "Secondary" })
+        Set-ButtonStyle $identityTabButton $(if ($Name -eq "Identity") { "Primary" } else { "Secondary" })
         Set-ButtonStyle $settingsTabButton $(if ($Name -eq "Settings") { "Primary" } else { "Secondary" })
         Set-ButtonStyle $helpTabButton $(if ($Name -eq "Help") { "Primary" } else { "Secondary" })
     }
     $setupTabButton.Add_Click({ & $showPage "Setup" })
     $tailscaleTabButton.Add_Click({ & $showPage "Tailscale" })
+    $identityTabButton.Add_Click({ & $showPage "Identity" })
     $settingsTabButton.Add_Click({ & $showPage "Settings" })
     $helpTabButton.Add_Click({ & $showPage "Help" })
 
@@ -1990,6 +2164,110 @@ Status log
     $tailscaleHelpGroup.Controls.Add($tailscaleHelp)
     $tailscaleLayout.Controls.Add($tailscaleHelpGroup, 0, 1)
 
+    $macGroup = New-Group "Network MAC identity"
+    & $makeGroupAutoHeight $macGroup
+    $macGrid = New-StepGrid 7
+    $macGrid.RowStyles.Clear()
+    foreach ($height in @(34, 30, 30, 30, 30, 34, 42)) {
+        $macGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, (S $height))) | Out-Null
+    }
+    $macGroup.Controls.Add($macGrid)
+    $macIntro = [Windows.Forms.Label]::new()
+    $macIntro.Text = "Advanced: generate or set a persistent JetKVM Ethernet MAC override. This does not clone this PC and does not use real third-party vendor OUIs by default."
+    $macIntro.Dock = "Fill"
+    $macIntro.ForeColor = $ui.Muted
+    $macIntro.Font = [Drawing.Font]::new("Segoe UI", 9)
+    $macCurrentLabel = New-RowLabel "Current JetKVM MAC: not checked"
+    $macOverrideLabel = New-RowLabel "User override: not checked"
+    $macProfiles = Get-MacIdentityProfiles
+    $macProfileBox = [Windows.Forms.ComboBox]::new()
+    $macProfileBox.Dock = "Fill"
+    $macProfileBox.DropDownStyle = [Windows.Forms.ComboBoxStyle]::DropDownList
+    $macProfileBox.Margin = New-ScaledPadding 0 2 8 2
+    $macProfileBox.BackColor = $ui.Input
+    $macProfileBox.ForeColor = $ui.InputText
+    $macProfileBox.Font = [Drawing.Font]::new("Segoe UI", 9)
+    [void]$macProfileBox.Items.AddRange(($macProfiles | ForEach-Object { $_.Name }))
+    $macProfileBox.SelectedItem = $macProfiles[0].Name
+    $macProfileHelp = New-RowLabel $macProfiles[0].Description
+    $macBox = New-Field ""
+    $macWarning = [Windows.Forms.Label]::new()
+    $macWarning.Text = "Changing MAC may change the JetKVM IP, DHCP reservation, firewall rules, and remote access. Reboot is required before the value is active."
+    $macWarning.Dock = "Fill"
+    $macWarning.ForeColor = $ui.Warn
+    $macWarning.Font = [Drawing.Font]::new("Segoe UI", 9, [Drawing.FontStyle]::Bold)
+    $refreshMacButton = [Windows.Forms.Button]::new()
+    $refreshMacButton.Text = "Refresh"
+    $refreshMacButton.Dock = "Fill"
+    $refreshMacButton.Margin = New-ScaledPadding 8 2 8 2
+    Set-ButtonStyle $refreshMacButton "Secondary"
+    $generateMacButton = [Windows.Forms.Button]::new()
+    $generateMacButton.Text = "Generate"
+    $generateMacButton.Dock = "Fill"
+    $generateMacButton.Margin = New-ScaledPadding 8 2 8 2
+    Set-ButtonStyle $generateMacButton "Secondary"
+    $applyMacButton = [Windows.Forms.Button]::new()
+    $applyMacButton.Text = "Apply"
+    $applyMacButton.Dock = "Fill"
+    $applyMacButton.Margin = New-ScaledPadding 8 2 8 2
+    Set-ButtonStyle $applyMacButton "Primary"
+    $clearMacButton = [Windows.Forms.Button]::new()
+    $clearMacButton.Text = "Clear override"
+    $clearMacButton.Dock = "Fill"
+    $clearMacButton.Margin = New-ScaledPadding 8 2 8 2
+    Set-ButtonStyle $clearMacButton "Secondary"
+    $macGrid.Controls.Add($macIntro, 0, 0)
+    $macGrid.SetColumnSpan($macIntro, 3)
+    $macGrid.Controls.Add($macCurrentLabel, 0, 1)
+    $macGrid.SetColumnSpan($macCurrentLabel, 2)
+    $macGrid.Controls.Add($refreshMacButton, 2, 1)
+    $macGrid.Controls.Add($macOverrideLabel, 0, 2)
+    $macGrid.SetColumnSpan($macOverrideLabel, 3)
+    $macGrid.Controls.Add((New-RowLabel "MAC profile"), 0, 3)
+    $macGrid.Controls.Add($macProfileBox, 1, 3)
+    $macGrid.Controls.Add($generateMacButton, 2, 3)
+    $macGrid.Controls.Add($macProfileHelp, 1, 4)
+    $macGrid.SetColumnSpan($macProfileHelp, 2)
+    $macGrid.Controls.Add((New-RowLabel "MAC to apply"), 0, 5)
+    $macGrid.Controls.Add($macBox, 1, 5)
+    $macGrid.Controls.Add($applyMacButton, 2, 5)
+    $macGrid.Controls.Add($macWarning, 0, 6)
+    $macGrid.SetColumnSpan($macWarning, 2)
+    $macGrid.Controls.Add($clearMacButton, 2, 6)
+    $identityLayout.Controls.Add($macGroup, 0, 0)
+
+    $identityScanGroup = New-Group "Display and USB identity"
+    & $makeGroupAutoHeight $identityScanGroup
+    $identityScanGrid = New-StepGrid 5
+    $identityScanGrid.RowStyles.Clear()
+    foreach ($height in @(32, 28, 28, 28, 38)) {
+        $identityScanGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, (S $height))) | Out-Null
+    }
+    $identityScanGroup.Controls.Add($identityScanGrid)
+    $identityScanIntro = [Windows.Forms.Label]::new()
+    $identityScanIntro.Text = "Next identity work: EDID presets/custom EDID and USB keyboard/mouse adapter identity. For now this can scan the Windows PC and log monitor EDID plus USB VID/PID candidates."
+    $identityScanIntro.Dock = "Fill"
+    $identityScanIntro.ForeColor = $ui.Muted
+    $identityScanIntro.Font = [Drawing.Font]::new("Segoe UI", 9)
+    $edidStatusLabel = New-RowLabel "Display EDID: not scanned"
+    $usbStatusLabel = New-RowLabel "USB input devices: not scanned"
+    $identityNote = New-RowLabel "Applying EDID/USB identity to JetKVM will be added after the JetKVM RPC/config path is tested."
+    $scanThisPcButton = [Windows.Forms.Button]::new()
+    $scanThisPcButton.Text = "Scan this PC identity"
+    $scanThisPcButton.Dock = "Fill"
+    $scanThisPcButton.Margin = New-ScaledPadding 8 2 8 2
+    Set-ButtonStyle $scanThisPcButton "Secondary"
+    $identityScanGrid.Controls.Add($identityScanIntro, 0, 0)
+    $identityScanGrid.SetColumnSpan($identityScanIntro, 3)
+    $identityScanGrid.Controls.Add($edidStatusLabel, 0, 1)
+    $identityScanGrid.SetColumnSpan($edidStatusLabel, 3)
+    $identityScanGrid.Controls.Add($usbStatusLabel, 0, 2)
+    $identityScanGrid.SetColumnSpan($usbStatusLabel, 3)
+    $identityScanGrid.Controls.Add($identityNote, 0, 3)
+    $identityScanGrid.SetColumnSpan($identityNote, 3)
+    $identityScanGrid.Controls.Add($scanThisPcButton, 2, 4)
+    $identityLayout.Controls.Add($identityScanGroup, 0, 1)
+
     $settingsGroup = New-Group "Settings"
     $settingsGrid = New-StepGrid 8
     $settingsGroup.Controls.Add($settingsGrid)
@@ -2098,6 +2376,11 @@ Status log
         $checkTailscaleButton.Enabled = -not $Busy
         $repairTailscaleButton.Enabled = -not $Busy
         $removeTailscaleButton.Enabled = -not $Busy
+        $refreshMacButton.Enabled = -not $Busy
+        $generateMacButton.Enabled = -not $Busy
+        $applyMacButton.Enabled = -not $Busy
+        $clearMacButton.Enabled = -not $Busy
+        $scanThisPcButton.Enabled = -not $Busy
         $statusLabel.Text = $Status
         [Windows.Forms.Application]::DoEvents()
     }
@@ -2183,6 +2466,223 @@ Status log
             & $log "Public key copied to clipboard. Paste it into JetKVM Settings > Advanced > Developer Mode."
         } catch {
             & $log ("ERROR: " + $_.Exception.Message)
+            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null
+        }
+    })
+
+    $getSelectedMacProfile = {
+        $selectedName = [string]$macProfileBox.SelectedItem
+        foreach ($profile in $macProfiles) {
+            if ($profile.Name -eq $selectedName) { return $profile }
+        }
+        return $macProfiles[0]
+    }
+
+    $macProfileBox.Add_SelectedIndexChanged({
+        $profile = & $getSelectedMacProfile
+        $macProfileHelp.Text = $profile.Description
+    })
+
+    $refreshMacStatus = {
+        $ip = $ipBox.Text.Trim()
+        $keyPath = $keyBox.Text.Trim()
+        Assert-ValidIpOrHost -Value $ip
+        $cmd = @"
+echo '--- mac identity ---'
+active=`$(cat /sys/class/net/eth0/address 2>/dev/null || ifconfig eth0 2>/dev/null | awk '/HWaddr|ether/{print `$5; exit}')
+echo "active=`$active"
+if [ -f /userdata/jetkvm/mac_address ]; then echo "user_override=`$(cat /userdata/jetkvm/mac_address)"; else echo "user_override=<none>"; fi
+if [ -f /userdata/.mac_address ]; then echo "system_mac=`$(cat /userdata/.mac_address)"; else echo "system_mac=<none>"; fi
+if [ -f /data/ethaddr.txt ]; then echo "legacy_override=`$(cat /data/ethaddr.txt)"; else echo "legacy_override=<none>"; fi
+echo '--- mac identity complete ---'
+"@
+        $result = Invoke-JetKvmSshCommand -JetKvmAddress $ip -KeyPath $keyPath -Command $cmd -TimeoutSeconds 25
+        if ($result.Output) { $result.Output -split "`n" | ForEach-Object { & $log $_ } }
+        if ($result.ExitCode -ne 0) { throw "MAC status check failed with exit code $($result.ExitCode)." }
+
+        $activeMatch = [regex]::Match($result.Output, '(?im)^active=([0-9A-Fa-f:]{17})')
+        $overrideMatch = [regex]::Match($result.Output, '(?im)^user_override=(.+)$')
+        $systemMatch = [regex]::Match($result.Output, '(?im)^system_mac=(.+)$')
+        if ($activeMatch.Success) {
+            $macCurrentLabel.Text = "Current JetKVM MAC: " + $activeMatch.Groups[1].Value.ToUpperInvariant()
+            $macCurrentLabel.ForeColor = $ui.Good
+        } else {
+            $macCurrentLabel.Text = "Current JetKVM MAC: not detected"
+            $macCurrentLabel.ForeColor = $ui.Warn
+        }
+        $overrideText = if ($overrideMatch.Success) { $overrideMatch.Groups[1].Value.Trim() } else { "<unknown>" }
+        $systemText = if ($systemMatch.Success) { $systemMatch.Groups[1].Value.Trim() } else { "<unknown>" }
+        $macOverrideLabel.Text = "User override: $overrideText    System MAC file: $systemText"
+        $macOverrideLabel.ForeColor = if ($overrideText -eq "<none>") { $ui.Muted } else { $ui.Warn }
+    }
+
+    $generateMacButton.Add_Click({
+        try {
+            $profile = & $getSelectedMacProfile
+            $macBox.Text = New-MacAddressFromProfile -Profile $profile
+            & $log "Generated $($profile.Name) MAC: $($macBox.Text)"
+        } catch {
+            & $log ("ERROR: " + $_.Exception.Message)
+            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null
+        }
+    })
+
+    $macBox.Add_Leave({
+        $macBox.Text = Format-MacAddress -Value $macBox.Text
+    })
+
+    $refreshMacButton.Add_Click({
+        try {
+            & $setBusy $true "Checking MAC identity..."
+            & $refreshMacStatus
+            & $setBusy $false "MAC check complete"
+        } catch {
+            & $log ("ERROR: " + $_.Exception.Message)
+            & $setBusy $false "Failed"
+            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null
+        }
+    })
+
+    $applyMacButton.Add_Click({
+        try {
+            $mac = Format-MacAddress -Value $macBox.Text
+            $macBox.Text = $mac
+            Assert-MacAddress -MacAddress $mac
+            if (-not (Test-MacAddressIsLocalAdministered -MacAddress $mac)) {
+                $answerGlobal = [Windows.Forms.MessageBox]::Show(
+                    "This MAC is not locally administered. That means it may belong to a real vendor range.`r`n`r`nUse a generated local-administered MAC unless you have a specific reason to override it.`r`n`r`nContinue anyway?",
+                    "Global MAC warning",
+                    "YesNo",
+                    "Warning"
+                )
+                if ($answerGlobal -ne [Windows.Forms.DialogResult]::Yes) { return }
+            }
+            $answer = [Windows.Forms.MessageBox]::Show(
+                "Write this MAC override to the JetKVM?`r`n`r`n$mac`r`n`r`nThe JetKVM will need to reboot before Ethernet uses it. Its IP address may change after reboot.",
+                "Apply JetKVM MAC override",
+                "YesNo",
+                "Warning"
+            )
+            if ($answer -ne [Windows.Forms.DialogResult]::Yes) {
+                & $log "MAC override cancelled."
+                return
+            }
+
+            & $setBusy $true "Applying MAC override..."
+            $ip = $ipBox.Text.Trim()
+            $keyPath = $keyBox.Text.Trim()
+            Assert-ValidIpOrHost -Value $ip
+            $quotedMac = ConvertTo-ShellSingleQuoted $mac
+            $cmd = "mkdir -p /userdata/jetkvm && printf '%s\n' $quotedMac > /userdata/jetkvm/mac_address && sync && echo 'MAC override written to /userdata/jetkvm/mac_address' && cat /userdata/jetkvm/mac_address"
+            $result = Invoke-JetKvmSshCommand -JetKvmAddress $ip -KeyPath $keyPath -Command $cmd -TimeoutSeconds 25
+            if ($result.Output) { $result.Output -split "`n" | ForEach-Object { & $log $_ } }
+            if ($result.ExitCode -ne 0) { throw "MAC override failed with exit code $($result.ExitCode)." }
+            & $log "MAC override saved. Reboot JetKVM for it to become active."
+
+            $reboot = [Windows.Forms.MessageBox]::Show(
+                "MAC override saved. Reboot the JetKVM now?`r`n`r`nAfter reboot, the JetKVM may receive a different LAN IP address.",
+                "Reboot JetKVM",
+                "YesNo",
+                "Question"
+            )
+            if ($reboot -eq [Windows.Forms.DialogResult]::Yes) {
+                try {
+                    $null = Invoke-JetKvmSshCommand -JetKvmAddress $ip -KeyPath $keyPath -Command "( sleep 1; reboot ) >/dev/null 2>&1 &" -TimeoutSeconds 5
+                } catch {
+                    & $log "Reboot command sent; SSH may disconnect while JetKVM restarts."
+                }
+                & $setBusy $false "JetKVM rebooting"
+            } else {
+                & $setBusy $false "MAC override saved"
+            }
+        } catch {
+            & $log ("ERROR: " + $_.Exception.Message)
+            & $setBusy $false "Failed"
+            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null
+        }
+    })
+
+    $clearMacButton.Add_Click({
+        try {
+            $answer = [Windows.Forms.MessageBox]::Show(
+                "Clear the JetKVM user MAC override?`r`n`r`nThis removes /userdata/jetkvm/mac_address and the legacy /data/ethaddr.txt override if present. It does not remove JetKVM's system-generated stable MAC file.",
+                "Clear JetKVM MAC override",
+                "YesNo",
+                "Warning"
+            )
+            if ($answer -ne [Windows.Forms.DialogResult]::Yes) {
+                & $log "Clear MAC override cancelled."
+                return
+            }
+            & $setBusy $true "Clearing MAC override..."
+            $ip = $ipBox.Text.Trim()
+            $keyPath = $keyBox.Text.Trim()
+            Assert-ValidIpOrHost -Value $ip
+            $cmd = "rm -f /userdata/jetkvm/mac_address /data/ethaddr.txt && sync && echo 'User MAC override cleared. Reboot JetKVM for the active MAC to refresh.'"
+            $result = Invoke-JetKvmSshCommand -JetKvmAddress $ip -KeyPath $keyPath -Command $cmd -TimeoutSeconds 25
+            if ($result.Output) { $result.Output -split "`n" | ForEach-Object { & $log $_ } }
+            if ($result.ExitCode -ne 0) { throw "Clearing MAC override failed with exit code $($result.ExitCode)." }
+            $macOverrideLabel.Text = "User override: cleared; reboot required"
+            $macOverrideLabel.ForeColor = $ui.Warn
+            $reboot = [Windows.Forms.MessageBox]::Show(
+                "MAC override cleared. Reboot the JetKVM now?",
+                "Reboot JetKVM",
+                "YesNo",
+                "Question"
+            )
+            if ($reboot -eq [Windows.Forms.DialogResult]::Yes) {
+                try {
+                    $null = Invoke-JetKvmSshCommand -JetKvmAddress $ip -KeyPath $keyPath -Command "( sleep 1; reboot ) >/dev/null 2>&1 &" -TimeoutSeconds 5
+                } catch {
+                    & $log "Reboot command sent; SSH may disconnect while JetKVM restarts."
+                }
+                & $setBusy $false "JetKVM rebooting"
+            } else {
+                & $setBusy $false "MAC override cleared"
+            }
+        } catch {
+            & $log ("ERROR: " + $_.Exception.Message)
+            & $setBusy $false "Failed"
+            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null
+        }
+    })
+
+    $scanThisPcButton.Add_Click({
+        try {
+            & $setBusy $true "Scanning this PC identity..."
+            & $log "--- this PC display EDID ---"
+            $edids = @(Get-LocalDisplayEdidRecords)
+            if ($edids.Count -eq 0) {
+                & $log "Warning: no local monitor EDID records were found."
+                $edidStatusLabel.Text = "Display EDID: none found"
+                $edidStatusLabel.ForeColor = $ui.Warn
+            } else {
+                $edidStatusLabel.Text = "Display EDID: found $($edids.Count) record(s)"
+                $edidStatusLabel.ForeColor = $ui.Good
+                foreach ($edid in ($edids | Select-Object -First 5)) {
+                    $previewLength = [Math]::Min(96, $edid.Hex.Length)
+                    & $log ("EDID {0} bytes: {1}..." -f $edid.Bytes, $edid.Hex.Substring(0, $previewLength))
+                }
+            }
+
+            & $log "--- this PC USB input candidates ---"
+            $usbDevices = @(Get-LocalUsbInputDevices)
+            if ($usbDevices.Count -eq 0) {
+                & $log "Warning: no local USB keyboard/mouse/HID VID/PID candidates were found."
+                $usbStatusLabel.Text = "USB input devices: none found"
+                $usbStatusLabel.ForeColor = $ui.Warn
+            } else {
+                $usbStatusLabel.Text = "USB input devices: found $($usbDevices.Count) candidate(s)"
+                $usbStatusLabel.ForeColor = $ui.Good
+                foreach ($device in ($usbDevices | Select-Object -First 12)) {
+                    & $log ("USB {0}:{1} [{2}] {3} - {4}" -f $device.VendorId, $device.ProductId, $device.Class, $device.Manufacturer, $device.Name)
+                }
+            }
+            & $log "Identity scan complete. EDID/USB apply controls will be added once the JetKVM RPC/config path is tested."
+            & $setBusy $false "Identity scan complete"
+        } catch {
+            & $log ("ERROR: " + $_.Exception.Message)
+            & $setBusy $false "Failed"
             [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null
         }
     })

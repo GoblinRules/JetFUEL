@@ -48,6 +48,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\JetFuel.ps1
 - Provides Tailscale check, repair, and remove actions.
 - Checks and repairs the JetKVM Tailscale boot hook at `/userdata/init.d/S22tailscale`.
 - Keeps colour-coded logs and a copy-log button.
+- Provides an Identity tab for JetKVM MAC status, generated local-administered MAC profiles, custom MAC override, and clearing the user override.
+- Scans the Windows PC for monitor EDID and USB keyboard/mouse VID/PID candidates for future display/USB identity options.
 
 ## Planned EDID Selector
 
@@ -56,6 +58,8 @@ JetFUEL is tracking EDID selector support for future deployment UI work. The pla
 See [docs/edid-selector-plan.md](docs/edid-selector-plan.md).
 
 JetFUEL is also tracking broader JetKVM identity options for display EDID, USB keyboard/mouse identity, and advanced MAC address override. See [docs/device-identity-plan.md](docs/device-identity-plan.md).
+
+Current identity support includes generated MAC profiles such as Android/media, Fire TV/streaming, TP-Link smart plug/IoT, and generic IoT. These profiles use local-administered generated MAC addresses by default; JetFUEL does not clone the Windows PC MAC address.
 
 ## Wizard Flow
 
