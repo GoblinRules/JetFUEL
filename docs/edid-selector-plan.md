@@ -58,7 +58,9 @@ For the `This PC monitor` option, read monitor EDID from Windows:
 
 The registry EDID is the most useful source because it contains the raw bytes needed by JetKVM.
 
-Keyboard and mouse identifiers are separate USB HID descriptors, not EDID. They can be collected later using `Win32_Keyboard`, `Win32_PointingDevice`, or `Win32_PnPEntity`, but only if JetKVM supports changing USB HID descriptors or if we add a separate USB identity feature.
+Keyboard and mouse identifiers are separate USB HID/USB gadget identity settings, not EDID. They can be collected later using `Win32_Keyboard`, `Win32_PointingDevice`, or `Win32_PnPEntity`.
+
+See [device-identity-plan.md](device-identity-plan.md) for the broader MAC, EDID, and USB identity investigation.
 
 ## Validation rules
 

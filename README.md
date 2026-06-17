@@ -55,6 +55,8 @@ JetFUEL is tracking EDID selector support for future deployment UI work. The pla
 
 See [docs/edid-selector-plan.md](docs/edid-selector-plan.md).
 
+JetFUEL is also tracking broader JetKVM identity options for display EDID, USB keyboard/mouse identity, and advanced MAC address override. See [docs/device-identity-plan.md](docs/device-identity-plan.md).
+
 ## Wizard Flow
 
 1. Enter the JetKVM IP address or hostname.
