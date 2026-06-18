@@ -136,6 +136,15 @@ tskey-auth-
 
 The key ID shown in the Tailscale admin table, often ending in `CNTRL`, is not enough.
 
+## Exit and cleanup
+
+Use the red `EXIT` button in the wizard header when you are finished.
+
+- `No` exits only.
+- `Yes` removes JetFUEL temp folders and the downloaded `%LOCALAPPDATA%\JetFUEL` bootstrap copy when present.
+- SSH keys are left in place.
+- Git for Windows / Git Bash is only uninstalled after a second confirmation because other tools may depend on it.
+
 ## Troubleshooting
 
 - Run PowerShell as Administrator for the smoothest setup.

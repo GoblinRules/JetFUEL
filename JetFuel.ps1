@@ -277,6 +277,203 @@ function Install-GitForWindows {
     return $bash
 }
 
+function Write-JetFuelCleanupLog {
+    param(
+        [scriptblock]$Log,
+        [Parameter(Mandatory)][string]$Message
+    )
+
+    if ($Log) {
+        & $Log $Message
+    } else {
+        Write-Host $Message
+    }
+}
+
+function Get-NormalizedPath {
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $null }
+    try {
+        return [IO.Path]::GetFullPath($Path).TrimEnd("\")
+    } catch {
+        return $Path.TrimEnd("\")
+    }
+}
+
+function Test-PathInsideDirectory {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Root
+    )
+
+    $normalPath = Get-NormalizedPath -Path $Path
+    $normalRoot = Get-NormalizedPath -Path $Root
+    if (-not $normalPath -or -not $normalRoot) { return $false }
+    if ([string]::Equals($normalPath, $normalRoot, [StringComparison]::OrdinalIgnoreCase)) { return $true }
+    return $normalPath.StartsWith($normalRoot + "\", [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Start-JetFuelDelayedDirectoryRemoval {
+    param([Parameter(Mandatory)][string]$Path)
+
+    $safePath = $Path.Replace("'", "''")
+    $parentPid = $PID
+    $cleanupScript = @"
+try { Wait-Process -Id $parentPid -Timeout 45 -ErrorAction SilentlyContinue } catch {}
+Start-Sleep -Seconds 2
+`$target = '$safePath'
+if (`$target -and (Test-Path -LiteralPath `$target)) {
+    Remove-Item -LiteralPath `$target -Recurse -Force -ErrorAction SilentlyContinue
+}
+"@
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($cleanupScript))
+    Start-Process -FilePath "powershell.exe" -ArgumentList @(
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-WindowStyle", "Hidden",
+        "-EncodedCommand", $encoded
+    ) -WindowStyle Hidden | Out-Null
+}
+
+function Get-GitForWindowsInstallInfo {
+    $bash = Get-GitBashPath
+    if (-not $bash) { return $null }
+
+    $binDir = Split-Path -Parent $bash
+    $root = Split-Path -Parent $binDir
+    if ((Split-Path -Leaf $root) -ieq "usr") {
+        $root = Split-Path -Parent $root
+    }
+
+    return [pscustomobject]@{
+        Bash = $bash
+        Root = $root
+        Uninstaller = Join-Path $root "unins000.exe"
+    }
+}
+
+function Uninstall-GitForWindows {
+    param([scriptblock]$Log)
+
+    $gitInfo = Get-GitForWindowsInstallInfo
+    if (-not $gitInfo) {
+        Write-JetFuelCleanupLog -Log $Log -Message "Git Bash was not found; no Git uninstall needed."
+        return
+    }
+
+    $wingetState = Test-WingetAvailable
+    if ($wingetState.Ok) {
+        Write-JetFuelCleanupLog -Log $Log -Message "Uninstalling Git for Windows with winget..."
+        $args = @(
+            "uninstall",
+            "--id", "Git.Git",
+            "--exact",
+            "--silent",
+            "--accept-source-agreements",
+            "--disable-interactivity"
+        )
+        try {
+            $process = Start-Process -FilePath $wingetState.Path -ArgumentList $args -Wait -PassThru -WindowStyle Hidden
+            if ($process.ExitCode -eq 0) {
+                Write-JetFuelCleanupLog -Log $Log -Message "Git for Windows uninstall completed with winget."
+                return
+            }
+            Write-JetFuelCleanupLog -Log $Log -Message "Warning: winget Git uninstall exited with code $($process.ExitCode); trying Git uninstaller if available."
+        } catch {
+            Write-JetFuelCleanupLog -Log $Log -Message "Warning: winget Git uninstall could not run: $(Get-CleanExceptionMessage -ErrorRecord $_)"
+        }
+    } else {
+        Write-JetFuelCleanupLog -Log $Log -Message "Warning: $($wingetState.Message)"
+    }
+
+    if ($gitInfo.Uninstaller -and (Test-Path -LiteralPath $gitInfo.Uninstaller)) {
+        Write-JetFuelCleanupLog -Log $Log -Message "Running Git for Windows uninstaller: $($gitInfo.Uninstaller)"
+        $process = Start-Process -FilePath $gitInfo.Uninstaller -ArgumentList @("/VERYSILENT", "/NORESTART") -Wait -PassThru -WindowStyle Hidden
+        if ($process.ExitCode -eq 0) {
+            Write-JetFuelCleanupLog -Log $Log -Message "Git for Windows uninstall completed."
+            return
+        }
+        throw "Git for Windows uninstaller failed with exit code $($process.ExitCode)."
+    }
+
+    throw "Git for Windows was found at $($gitInfo.Root), but JetFUEL could not find a working uninstaller."
+}
+
+function Remove-JetFuelTemporaryFiles {
+    param([scriptblock]$Log)
+
+    $tempRoot = [IO.Path]::GetTempPath()
+    $items = @()
+    try {
+        $items = @(Get-ChildItem -LiteralPath $tempRoot -Force -ErrorAction Stop | Where-Object {
+            $_.Name -match '^JetFUEL(-home)?-[0-9A-Fa-f]{32}$'
+        })
+    } catch {
+        Write-JetFuelCleanupLog -Log $Log -Message "Warning: could not list temp files: $(Get-CleanExceptionMessage -ErrorRecord $_)"
+    }
+
+    foreach ($item in $items) {
+        try {
+            Remove-Item -LiteralPath $item.FullName -Recurse -Force -ErrorAction Stop
+            Write-JetFuelCleanupLog -Log $Log -Message "Removed temp item: $($item.FullName)"
+        } catch {
+            Write-JetFuelCleanupLog -Log $Log -Message "Warning: could not remove temp item $($item.FullName): $(Get-CleanExceptionMessage -ErrorRecord $_)"
+        }
+    }
+
+    if ($items.Count -eq 0) {
+        Write-JetFuelCleanupLog -Log $Log -Message "No JetFUEL temp folders found."
+    }
+}
+
+function Remove-JetFuelLocalCache {
+    param([scriptblock]$Log)
+
+    if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) { return }
+    $localRoot = Join-Path $env:LOCALAPPDATA "JetFUEL"
+    if (-not (Test-Path -LiteralPath $localRoot)) {
+        Write-JetFuelCleanupLog -Log $Log -Message "No JetFUEL local cache found."
+        return
+    }
+
+    if (Test-PathInsideDirectory -Path $PSScriptRoot -Root $localRoot) {
+        Start-JetFuelDelayedDirectoryRemoval -Path $localRoot
+        Write-JetFuelCleanupLog -Log $Log -Message "Queued JetFUEL local cache removal after exit: $localRoot"
+        return
+    }
+
+    Remove-Item -LiteralPath $localRoot -Recurse -Force -ErrorAction Stop
+    Write-JetFuelCleanupLog -Log $Log -Message "Removed JetFUEL local cache: $localRoot"
+}
+
+function Invoke-JetFuelCleanup {
+    param([scriptblock]$Log)
+
+    Write-JetFuelCleanupLog -Log $Log -Message "Starting JetFUEL cleanup. SSH key files are left untouched."
+    Remove-JetFuelTemporaryFiles -Log $Log
+    Remove-JetFuelLocalCache -Log $Log
+
+    $gitInfo = Get-GitForWindowsInstallInfo
+    if ($gitInfo) {
+        $choice = [Windows.Forms.MessageBox]::Show(
+            "Uninstall Git for Windows / Git Bash now?`r`n`r`nThis can affect other tools that use Git. SSH keys in your .ssh folder will not be removed.",
+            "Uninstall Git Bash?",
+            "YesNo",
+            "Warning"
+        )
+        if ($choice -eq [Windows.Forms.DialogResult]::Yes) {
+            Uninstall-GitForWindows -Log $Log
+        } else {
+            Write-JetFuelCleanupLog -Log $Log -Message "Git for Windows left installed by user choice."
+        }
+    } else {
+        Write-JetFuelCleanupLog -Log $Log -Message "Git Bash was not found; no Git uninstall needed."
+    }
+
+    Write-JetFuelCleanupLog -Log $Log -Message "Cleanup complete. SSH key files were not changed."
+}
+
 function ConvertTo-BashPath {
     param(
         [Parameter(Mandatory)][string]$BashPath,
@@ -2201,12 +2398,33 @@ function Start-JetFuelGuiV2 {
             $Button.BackColor = $ui.Accent
             $Button.ForeColor = [Drawing.Color]::White
             $Button.FlatAppearance.BorderColor = $ui.AccentHover
+        } elseif ($Kind -eq "Danger") {
+            $Button.BackColor = $ui.Bad
+            $Button.ForeColor = [Drawing.Color]::White
+            $Button.FlatAppearance.BorderColor = [Drawing.Color]::FromArgb(248, 113, 113)
         } else {
             $Button.BackColor = $ui.Surface2
             $Button.ForeColor = $ui.Text
             $Button.FlatAppearance.BorderColor = $ui.Border
         }
     }
+
+    $exitButton = [Windows.Forms.Button]::new()
+    $exitButton.Text = "EXIT"
+    $exitButton.Size = [Drawing.Size]::new((S 112), (S 34))
+    $exitButton.Anchor = [Windows.Forms.AnchorStyles]::Top -bor [Windows.Forms.AnchorStyles]::Right
+    Set-ButtonStyle $exitButton "Danger"
+    $header.Controls.Add($exitButton)
+    $positionExitButton = {
+        $exitButton.SetBounds(
+            [Math]::Max((S 260), $header.ClientSize.Width - $exitButton.Width - (S 14)),
+            (S 14),
+            $exitButton.Width,
+            $exitButton.Height
+        )
+    }
+    $header.Add_Resize({ & $positionExitButton })
+    & $positionExitButton
 
     function Set-CheckStyle([Windows.Forms.CheckBox]$CheckBox) {
         $CheckBox.ForeColor = $ui.Text
@@ -2433,6 +2651,12 @@ Step 5 - Run install
 - Runs preflight checks, downloads or loads the selected installer script, patches SSH handling for the chosen key, and starts the install.
 - The JetKVM will reboot during installation.
 - If no auth key is supplied, the wizard will look for a Tailscale browser login URL and wait for login to complete.
+
+Exit / cleanup
+- The red EXIT button asks whether to exit only, clean up and exit, or cancel.
+- Cleanup removes JetFUEL temp folders and the downloaded %LOCALAPPDATA%\JetFUEL bootstrap copy when present.
+- SSH keys are left in place.
+- Git for Windows / Git Bash is only uninstalled after a second confirmation because other tools may use it.
 
 Tailscale tab
 - Check Tailscale prints status, Tailscale IP, version, routes, DNS, and running Tailscale processes.
@@ -3173,6 +3397,7 @@ Status log
         $applyEdidButton.Enabled = (-not $Busy) -and $displayChoiceBox.Enabled -and ($null -ne $displayChoiceBox.SelectedItem)
         $applyUsbButton.Enabled = (-not $Busy) -and $usbChoiceBox.Enabled -and ($null -ne $usbChoiceBox.SelectedItem)
         $applyDeviceSettingsButton.Enabled = -not $Busy
+        $exitButton.Enabled = -not $Busy
         $statusLabel.Text = $Status
         [Windows.Forms.Application]::DoEvents()
     }
@@ -3207,6 +3432,36 @@ Status log
         } catch {
             [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null
         }
+    })
+    $exitButton.Add_Click({
+        $choice = [Windows.Forms.MessageBox]::Show(
+            "Exit JetFUEL?`r`n`r`nYes = clean up JetFUEL temp/downloaded files, optionally uninstall Git Bash, then exit.`r`nNo = exit only.`r`nCancel = stay here.`r`n`r`nSSH key files are left in place.",
+            "Exit JetFUEL",
+            "YesNoCancel",
+            "Warning"
+        )
+        if ($choice -eq [Windows.Forms.DialogResult]::Cancel) { return }
+
+        if ($choice -eq [Windows.Forms.DialogResult]::Yes) {
+            try {
+                & $setBusy $true "Cleaning up..."
+                Invoke-JetFuelCleanup -Log $log
+                & $setBusy $false "Cleanup complete"
+            } catch {
+                $message = Get-CleanExceptionMessage -ErrorRecord $_
+                & $log "ERROR: Cleanup failed: $message"
+                & $setBusy $false "Cleanup failed"
+                $exitAnyway = [Windows.Forms.MessageBox]::Show(
+                    "Cleanup hit a problem:`r`n`r`n$message`r`n`r`nExit JetFUEL anyway?",
+                    "Cleanup failed",
+                    "YesNo",
+                    "Warning"
+                )
+                if ($exitAnyway -ne [Windows.Forms.DialogResult]::Yes) { return }
+            }
+        }
+
+        $form.Close()
     })
     $normalisingHostV2 = $false
     $hostBox.Add_TextChanged({
