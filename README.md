@@ -52,6 +52,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\JetFuel.ps1
 - Loads JetKVM's default EDID/USB identity presets, scans the Windows PC for monitor EDID and USB keyboard/mouse VID/PID candidates, then lets you choose human-readable display and USB identity candidates.
 - Applies selected EDID and USB identity values to JetKVM by backing up and updating `/userdata/kvm_config.json` over SSH, then offering to reboot JetKVM so the values load.
 - Scans this Windows PC for network adapters, optionally enables Wake-on-LAN on the selected adapter, and adds the PC as a JetKVM Wake on LAN target.
+- Provides an opt-in `BIOS - WARNING` tab for supported Dell, HP, and Lenovo PCs to scan local BIOS settings and apply Wake-on-LAN / AC power recovery prep using bundled ConfigJon Firmware-Management scripts.
 - Applies optional JetKVM device defaults for auto update, keyboard layout, display brightness/timers, HDMI sleep, network hostname/domain, mDNS, and IPv6 mode.
 - When a network hostname is enabled, writes JetKVM's runtime `/etc/hostname` and `/etc/hosts` as well as config, then offers a reboot so DHCP startup can use the new name.
 
@@ -87,6 +88,34 @@ On the Identity tab:
 Local WOL enablement requires PowerShell as Administrator and a NIC driver that exposes Wake-on-Magic-Packet settings. Many PCs also need Wake-on-LAN enabled in BIOS/UEFI. Wired Ethernet is usually more reliable than Wi-Fi for WOL.
 
 The JetKVM target write creates a timestamped backup of `/userdata/kvm_config.json` and then offers to reboot JetKVM so the web UI reloads the Wake on LAN device list.
+
+## BIOS Prep (Dell/HP/Lenovo)
+
+The `BIOS - WARNING` tab is optional and only affects the Windows PC running JetFUEL. It is not part of `Step 5 - Run install` and never runs automatically.
+
+JetFUEL bundles pinned copies of ConfigJon Firmware-Management scripts for Dell, HP, and Lenovo so it can:
+
+- Scan supported local BIOS/UEFI settings.
+- Preview planned changes before anything is written.
+- Enable BIOS Wake-on-LAN support where the model exposes a matching setting.
+- Set power-on-after-AC-restore where the model exposes a matching setting.
+- Disable known deep sleep / maximum power saving settings that can block Wake-on-LAN.
+
+JetFUEL does not change PXE/network boot order.
+
+BIOS passwords are typed only for the current run. JetFUEL passes them to the child PowerShell process through environment variables, redacts them from logs, and does not save them.
+
+Credit: BIOS scan/apply support uses [ConfigJon Firmware-Management](https://github.com/ConfigJon/Firmware-Management), bundled under its MIT license.
+
+Useful vendor resources:
+
+- Lenovo direct download: https://download.lenovo.com/pccbbs/thinkvantage_en/system_update_5.08.03.59.exe
+- Lenovo download page: https://support.lenovo.com/gb/en/solutions/ht037099
+- HP direct download: https://ftp.hp.com/pub/softpaq/sp143501-144000/sp143621.exe
+- HP download page: https://ftp.ext.hp.com/pub/caps-softpaq/cmit/HP_BCU.html
+- Dell direct download: model-specific; use Dell Support for the target model/service tag.
+- Dell download page: https://www.dell.com/support/contents/en-uk/article/product-support/self-support-knowledgebase/fix-common-issues/bios-uefi
+- ConfigJon site: https://www.configjon.com/
 
 ## Wizard Flow
 
@@ -171,6 +200,7 @@ Use the red `EXIT` button in the wizard header when you are finished.
 - Tailscale installation may fail if the JetKVM itself is set up/authenticated using Google auth. Use local JetKVM authentication for this SSH/Developer Mode flow.
 - If SSH login fails, confirm Developer Mode is enabled, the public key was saved in JetKVM Settings > Advanced, and the selected private key matches the public key.
 - If Wake-on-LAN does not wake the Windows PC, confirm WOL is enabled in BIOS/UEFI, Windows adapter power management, and the NIC advanced driver settings. Prefer wired Ethernet. Some Wi-Fi adapters and USB Ethernet adapters cannot wake a fully powered-off PC.
+- If BIOS prep reports unsupported or missing settings, the local model may use different firmware setting names. Check the vendor BIOS tool/download page for that model and use the BIOS UI manually where needed.
 
 ## Disclaimer
 
@@ -183,3 +213,5 @@ Use at your own risk. You are responsible for reviewing scripts before running t
 ## License
 
 This project is licensed under the MIT License. See [LICENSE](LICENSE).
+
+Bundled ConfigJon Firmware-Management scripts are MIT licensed by ConfigJon. Their copied license is stored at [third_party/ConfigJon-Firmware-Management/LICENSE](third_party/ConfigJon-Firmware-Management/LICENSE).

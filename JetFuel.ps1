@@ -49,6 +49,12 @@ function Get-CommandPath {
     return $null
 }
 
+function Get-JetFuelScriptRoot {
+    if (-not [string]::IsNullOrWhiteSpace($PSScriptRoot)) { return $PSScriptRoot }
+    if (-not [string]::IsNullOrWhiteSpace($PSCommandPath)) { return (Split-Path -Parent $PSCommandPath) }
+    return (Get-Location).ProviderPath
+}
+
 function Get-CleanExceptionMessage {
     param([Parameter(Mandatory)]$ErrorRecord)
 
@@ -437,7 +443,7 @@ function Remove-JetFuelLocalCache {
         return
     }
 
-    if (Test-PathInsideDirectory -Path $PSScriptRoot -Root $localRoot) {
+    if (Test-PathInsideDirectory -Path (Get-JetFuelScriptRoot) -Root $localRoot) {
         Start-JetFuelDelayedDirectoryRemoval -Path $localRoot
         Write-JetFuelCleanupLog -Log $Log -Message "Queued JetFUEL local cache removal after exit: $localRoot"
         return
@@ -561,7 +567,7 @@ function Download-PatchedJetKvmTailscaleInstaller {
             Invoke-WebRequest -UseBasicParsing -Uri "https://jetkvm.com/install-tailscale.sh" -OutFile $scriptPath
         }
         "JetFUEL repo" {
-            $repoScript = Join-Path $PSScriptRoot "install-tailscale.sh"
+            $repoScript = Join-Path (Get-JetFuelScriptRoot) "install-tailscale.sh"
             if (-not (Test-Path -LiteralPath $repoScript)) {
                 throw "JetFUEL repo installer was selected, but install-tailscale.sh was not found next to JetFuel.ps1."
             }
@@ -1648,6 +1654,524 @@ function Update-JetKvmWakeOnLanDevice {
     Save-JetKvmConfigObject -JetKvmAddress $JetKvmAddress -KeyPath $KeyPath -Config $config -Log $Log
 }
 
+function ConvertTo-PowerShellSingleQuoted {
+    param([AllowEmptyString()][string]$Value)
+    return "'" + ([string]$Value).Replace("'", "''") + "'"
+}
+
+function Get-LocalBiosVendorInfo {
+    $system = $null
+    $bios = $null
+    try { $system = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop } catch {}
+    try { $bios = Get-CimInstance Win32_BIOS -ErrorAction SilentlyContinue } catch {}
+
+    $manufacturer = if ($system) { ([string]$system.Manufacturer).Trim() } else { "" }
+    $model = if ($system) { ([string]$system.Model).Trim() } else { "" }
+    $biosVersion = if ($bios) { ((@($bios.SMBIOSBIOSVersion, $bios.Version) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -First 1) -as [string]) } else { "" }
+    $serial = if ($bios) { ([string]$bios.SerialNumber).Trim() } else { "" }
+
+    $vendorKey = "Unsupported"
+    $displayVendor = "Unsupported"
+    if ($manufacturer -match 'Dell') {
+        $vendorKey = "Dell"
+        $displayVendor = "Dell"
+    } elseif ($manufacturer -match 'HP|Hewlett-Packard') {
+        $vendorKey = "HP"
+        $displayVendor = "HP"
+    } elseif ($manufacturer -match 'Lenovo') {
+        $vendorKey = "Lenovo"
+        $displayVendor = "Lenovo"
+    }
+
+    return [pscustomobject]@{
+        Manufacturer = $manufacturer
+        Model = $model
+        BiosVersion = $biosVersion
+        SerialNumber = $serial
+        VendorKey = $vendorKey
+        DisplayVendor = $displayVendor
+        Supported = ($vendorKey -ne "Unsupported")
+    }
+}
+
+function Get-ConfigJonBiosRoot {
+    $root = Get-JetFuelScriptRoot
+    return (Join-Path $root "third_party\ConfigJon-Firmware-Management")
+}
+
+function Get-ConfigJonBiosManifest {
+    $path = Join-Path (Get-ConfigJonBiosRoot) "metadata.json"
+    if (-not (Test-Path -LiteralPath $path)) { return $null }
+    try {
+        return (Get-Content -LiteralPath $path -Raw | ConvertFrom-Json)
+    } catch {
+        return $null
+    }
+}
+
+function Get-ConfigJonBiosScriptPath {
+    param([Parameter(Mandatory)][ValidateSet("Dell", "HP", "Lenovo")] [string]$VendorKey)
+
+    $root = Get-ConfigJonBiosRoot
+    $relative = switch ($VendorKey) {
+        "Dell" { "Dell\Manage-DellBiosSettings-WMI.ps1" }
+        "HP" { "HP\Manage-HPBiosSettings-WMI.ps1" }
+        "Lenovo" { "Lenovo\Manage-LenovoBiosSettings.ps1" }
+    }
+    $path = Join-Path $root $relative
+    if (-not (Test-Path -LiteralPath $path)) {
+        throw "Bundled ConfigJon BIOS script is missing: $path"
+    }
+    return $path
+}
+
+function Get-BiosWorkDirectory {
+    $path = Join-Path $env:TEMP "JetFUEL\BIOS"
+    New-Item -ItemType Directory -Force -Path $path | Out-Null
+    return $path
+}
+
+function Redact-BiosText {
+    param(
+        [AllowEmptyString()][string]$Text,
+        [AllowEmptyString()][string[]]$Secrets
+    )
+
+    $clean = [string]$Text
+    foreach ($secret in @($Secrets)) {
+        if (-not [string]::IsNullOrWhiteSpace($secret)) {
+            $clean = $clean.Replace($secret, "<redacted>")
+        }
+    }
+    return $clean
+}
+
+function Invoke-ConfigJonBiosScript {
+    param(
+        [Parameter(Mandatory)][ValidateSet("Dell", "HP", "Lenovo")] [string]$VendorKey,
+        [Parameter(Mandatory)][ValidateSet("Get", "Set")] [string]$Mode,
+        [Parameter(Mandatory)][string]$CsvPath,
+        [Parameter(Mandatory)][string]$LogFile,
+        [AllowEmptyString()][string]$BiosPassword,
+        [AllowEmptyString()][string]$SystemManagementPassword,
+        [int]$TimeoutSeconds = 180
+    )
+
+    $scriptPath = Get-ConfigJonBiosScriptPath -VendorKey $VendorKey
+    $scriptArg = ConvertTo-PowerShellSingleQuoted $scriptPath
+    $csvArg = ConvertTo-PowerShellSingleQuoted $CsvPath
+    $logArg = ConvertTo-PowerShellSingleQuoted $LogFile
+
+    $modeArg = if ($Mode -eq "Get") { "-GetSettings" } else { "-SetSettings" }
+    $passwordArgs = ""
+    if ($Mode -eq "Set" -and -not [string]::IsNullOrWhiteSpace($BiosPassword)) {
+        if ($VendorKey -eq "Dell") {
+            $passwordArgs += " -AdminPassword `$env:JETFUEL_BIOS_PASSWORD"
+        } elseif ($VendorKey -eq "HP") {
+            $passwordArgs += " -SetupPassword `$env:JETFUEL_BIOS_PASSWORD"
+        } elseif ($VendorKey -eq "Lenovo") {
+            $passwordArgs += " -SupervisorPassword `$env:JETFUEL_BIOS_PASSWORD"
+        }
+    }
+    if ($Mode -eq "Set" -and $VendorKey -eq "Lenovo" -and -not [string]::IsNullOrWhiteSpace($SystemManagementPassword)) {
+        $passwordArgs += " -SystemManagementPassword `$env:JETFUEL_BIOS_SM_PASSWORD"
+    }
+
+    $command = @"
+`$ErrorActionPreference = 'Continue'
+& $scriptArg $modeArg -CsvPath $csvArg -LogFile $logArg$passwordArgs
+if (`$global:LASTEXITCODE -is [int]) { exit `$global:LASTEXITCODE }
+exit 0
+"@
+
+    $powershell = Get-CommandPath -Name "powershell.exe"
+    if (-not $powershell) { throw "powershell.exe was not found." }
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+    $psi = [Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = $powershell
+    $psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -EncodedCommand $encoded"
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    if (-not [string]::IsNullOrWhiteSpace($BiosPassword)) {
+        $psi.EnvironmentVariables["JETFUEL_BIOS_PASSWORD"] = $BiosPassword
+    }
+    if (-not [string]::IsNullOrWhiteSpace($SystemManagementPassword)) {
+        $psi.EnvironmentVariables["JETFUEL_BIOS_SM_PASSWORD"] = $SystemManagementPassword
+    }
+
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $psi
+    [void]$process.Start()
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
+    if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+        try { $process.Kill() } catch {}
+        return [pscustomobject]@{
+            ExitCode = 124
+            TimedOut = $true
+            Output = "ConfigJon BIOS script timed out after $TimeoutSeconds seconds."
+            LogText = ""
+        }
+    }
+    try { $process.WaitForExit() } catch {}
+
+    $stdout = $stdoutTask.Result
+    $stderr = $stderrTask.Result
+    $logText = ""
+    if (Test-Path -LiteralPath $LogFile) {
+        try { $logText = Get-Content -LiteralPath $LogFile -Raw } catch {}
+    }
+
+    $combined = (($stdout, $stderr) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join "`n"
+    $combined = Redact-BiosText -Text $combined -Secrets @($BiosPassword, $SystemManagementPassword)
+    $logText = Redact-BiosText -Text $logText -Secrets @($BiosPassword, $SystemManagementPassword)
+
+    return [pscustomobject]@{
+        ExitCode = $process.ExitCode
+        TimedOut = $false
+        Output = $combined.Trim()
+        LogText = $logText.Trim()
+    }
+}
+
+function Get-BiosSettingValue {
+    param(
+        [Parameter(Mandatory)]$Setting,
+        [Parameter(Mandatory)][string]$PropertyName
+    )
+
+    if ($Setting.PSObject.Properties[$PropertyName]) {
+        return ([string]$Setting.$PropertyName).Trim()
+    }
+    return ""
+}
+
+function Get-BiosSettingPossibleValues {
+    param([Parameter(Mandatory)]$Setting)
+
+    $possibleText = ""
+    foreach ($name in @("PossibleValue", "PossibleValues", "Possible Values")) {
+        if ($Setting.PSObject.Properties[$name]) {
+            $possibleText = [string]$Setting.$name
+            break
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($possibleText)) { return @() }
+
+    return @(
+        $possibleText -split '[,;|]' |
+            ForEach-Object { $_.Trim() } |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and $_ -notmatch '^(N/A|None)$' }
+    )
+}
+
+function New-BiosCandidate {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][string]$Value,
+        [Parameter(Mandatory)][string]$Reason
+    )
+
+    return [pscustomobject]@{
+        Name = $Name
+        Value = $Value
+        Reason = $Reason
+    }
+}
+
+function Get-BiosTargetCandidates {
+    param(
+        [Parameter(Mandatory)][ValidateSet("Dell", "HP", "Lenovo")] [string]$VendorKey,
+        [bool]$EnableWakeOnLan = $true,
+        [bool]$PowerOnAfterAc = $true,
+        [bool]$DisablePowerBlockers = $true
+    )
+
+    $items = New-Object System.Collections.Generic.List[object]
+    if ($VendorKey -eq "Dell") {
+        if ($EnableWakeOnLan) { $items.Add((New-BiosCandidate "WakeOnLan" "LanOnly" "Enable Wake-on-LAN on wired LAN")) | Out-Null }
+        if ($PowerOnAfterAc) { $items.Add((New-BiosCandidate "WakeOnAc" "Enabled" "Power on after AC power is restored")) | Out-Null }
+    } elseif ($VendorKey -eq "HP") {
+        if ($EnableWakeOnLan) {
+            $items.Add((New-BiosCandidate "Wake On LAN" "Boot to Hard Drive" "Enable Wake-on-LAN")) | Out-Null
+            $items.Add((New-BiosCandidate "Wake on LAN" "Follow Boot Order" "Enable Wake-on-LAN")) | Out-Null
+            $items.Add((New-BiosCandidate "S5 Wake on LAN" "Enable" "Allow WOL from soft-off/S5")) | Out-Null
+            $items.Add((New-BiosCandidate "S4/S5 Wake on LAN" "Enable" "Allow WOL from sleep/soft-off")) | Out-Null
+            $items.Add((New-BiosCandidate "Remote Wakeup Boot Source" "Local Hard Drive" "Boot locally after remote wake")) | Out-Null
+        }
+        if ($PowerOnAfterAc) {
+            $items.Add((New-BiosCandidate "After Power Loss" "On" "Power on after AC power is restored")) | Out-Null
+            $items.Add((New-BiosCandidate "Power state after power loss" "Power On" "Power on after AC power is restored")) | Out-Null
+        }
+        if ($DisablePowerBlockers) {
+            $items.Add((New-BiosCandidate "Deep Sleep" "Off" "Disable deep sleep that can block WOL")) | Out-Null
+            $items.Add((New-BiosCandidate "S4/S5 Max Power Savings" "Disable" "Disable S4/S5 power saving that can block WOL")) | Out-Null
+            $items.Add((New-BiosCandidate "S5 Maximum Power Savings" "Disable" "Disable S5 power saving that can block WOL")) | Out-Null
+        }
+    } elseif ($VendorKey -eq "Lenovo") {
+        if ($EnableWakeOnLan) { $items.Add((New-BiosCandidate "Wake on LAN" "Primary" "Enable Wake-on-LAN")) | Out-Null }
+        if ($PowerOnAfterAc) {
+            $items.Add((New-BiosCandidate "After Power Loss" "Power On" "Power on after AC power is restored")) | Out-Null
+            $items.Add((New-BiosCandidate "Power On with AC Attach" "Enabled" "Power on after AC power is restored")) | Out-Null
+            $items.Add((New-BiosCandidate "Restore on AC Power Loss" "Power On" "Power on after AC power is restored")) | Out-Null
+        }
+        if ($DisablePowerBlockers) { $items.Add((New-BiosCandidate "Enhanced Power Saving Mode" "Disabled" "Disable power saving that can block WOL")) | Out-Null }
+    }
+
+    return @($items.ToArray())
+}
+
+function Resolve-BiosTargetSettings {
+    param(
+        [Parameter(Mandatory)][ValidateSet("Dell", "HP", "Lenovo")] [string]$VendorKey,
+        [Parameter(Mandatory)]$Settings,
+        [bool]$EnableWakeOnLan = $true,
+        [bool]$PowerOnAfterAc = $true,
+        [bool]$DisablePowerBlockers = $true
+    )
+
+    $settingMap = @{}
+    foreach ($setting in @($Settings)) {
+        $name = Get-BiosSettingValue -Setting $setting -PropertyName "Name"
+        if (-not [string]::IsNullOrWhiteSpace($name)) {
+            $key = $name.ToLowerInvariant()
+            if (-not $settingMap.ContainsKey($key)) { $settingMap[$key] = $setting }
+        }
+    }
+
+    $apply = New-Object System.Collections.Generic.List[object]
+    $already = New-Object System.Collections.Generic.List[object]
+    $missing = New-Object System.Collections.Generic.List[object]
+    $used = @{}
+
+    foreach ($candidate in (Get-BiosTargetCandidates -VendorKey $VendorKey -EnableWakeOnLan $EnableWakeOnLan -PowerOnAfterAc $PowerOnAfterAc -DisablePowerBlockers $DisablePowerBlockers)) {
+        $lookup = $candidate.Name.ToLowerInvariant()
+        if ($used.ContainsKey($lookup)) { continue }
+        if (-not $settingMap.ContainsKey($lookup)) {
+            $missing.Add([pscustomobject]@{
+                Name = $candidate.Name
+                TargetValue = $candidate.Value
+                CurrentValue = ""
+                Reason = $candidate.Reason
+                Status = "Not exposed on this model"
+            }) | Out-Null
+            continue
+        }
+
+        $setting = $settingMap[$lookup]
+        $actualName = Get-BiosSettingValue -Setting $setting -PropertyName "Name"
+        $current = Get-BiosSettingValue -Setting $setting -PropertyName "Value"
+        $possible = @(Get-BiosSettingPossibleValues -Setting $setting)
+        if ($possible.Count -gt 0 -and -not ($possible | Where-Object { $_ -ieq $candidate.Value })) {
+            $missing.Add([pscustomobject]@{
+                Name = $actualName
+                TargetValue = $candidate.Value
+                CurrentValue = $current
+                Reason = $candidate.Reason
+                Status = "Value not listed by BIOS as available"
+            }) | Out-Null
+            continue
+        }
+
+        $row = [pscustomobject]@{
+            Name = $actualName
+            Value = $candidate.Value
+            CurrentValue = $current
+            Reason = $candidate.Reason
+            Status = if ($current -ieq $candidate.Value) { "Already set" } else { "Will change" }
+        }
+        $used[$lookup] = $true
+        if ($current -ieq $candidate.Value) {
+            $already.Add($row) | Out-Null
+        } else {
+            $apply.Add($row) | Out-Null
+        }
+    }
+
+    return [pscustomobject]@{
+        ApplyRows = @($apply.ToArray())
+        AlreadyRows = @($already.ToArray())
+        MissingRows = @($missing.ToArray())
+    }
+}
+
+function Format-BiosTargetReport {
+    param(
+        [Parameter(Mandatory)]$VendorInfo,
+        [AllowNull()]$Targets
+    )
+
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add("Detected system: $($VendorInfo.Manufacturer) $($VendorInfo.Model)") | Out-Null
+    $lines.Add("BIOS version: $($VendorInfo.BiosVersion)") | Out-Null
+    $lines.Add("Vendor support: $($VendorInfo.DisplayVendor)") | Out-Null
+    $lines.Add("") | Out-Null
+
+    if (-not $VendorInfo.Supported) {
+        $lines.Add("This BIOS tab supports Dell, HP, and Lenovo only. No BIOS settings will be changed.") | Out-Null
+        return ($lines -join [Environment]::NewLine)
+    }
+
+    if (-not $Targets) {
+        $lines.Add("Run Scan BIOS to list supported WOL and power-recovery settings for this model.") | Out-Null
+        return ($lines -join [Environment]::NewLine)
+    }
+
+    if ($Targets.ApplyRows.Count -gt 0) {
+        $lines.Add("Settings that will change:") | Out-Null
+        foreach ($row in $Targets.ApplyRows) {
+            $lines.Add("  - $($row.Name): '$($row.CurrentValue)' -> '$($row.Value)' ($($row.Reason))") | Out-Null
+        }
+    } else {
+        $lines.Add("Settings that will change: none") | Out-Null
+    }
+    $lines.Add("") | Out-Null
+
+    if ($Targets.AlreadyRows.Count -gt 0) {
+        $lines.Add("Already correct:") | Out-Null
+        foreach ($row in $Targets.AlreadyRows) {
+            $lines.Add("  - $($row.Name): '$($row.Value)'") | Out-Null
+        }
+        $lines.Add("") | Out-Null
+    }
+
+    if ($Targets.MissingRows.Count -gt 0) {
+        $lines.Add("Not changed / not available on this model:") | Out-Null
+        foreach ($row in $Targets.MissingRows) {
+            $lines.Add("  - $($row.Name): $($row.Status)") | Out-Null
+        }
+    }
+
+    return ($lines -join [Environment]::NewLine)
+}
+
+function Invoke-BiosSettingsScan {
+    param(
+        [bool]$EnableWakeOnLan = $true,
+        [bool]$PowerOnAfterAc = $true,
+        [bool]$DisablePowerBlockers = $true,
+        [scriptblock]$Log
+    )
+
+    $vendor = Get-LocalBiosVendorInfo
+    if ($Log) {
+        & $Log "BIOS detected: $($vendor.Manufacturer) $($vendor.Model); BIOS $($vendor.BiosVersion)"
+    }
+    if (-not $vendor.Supported) {
+        return [pscustomobject]@{
+            VendorInfo = $vendor
+            Settings = @()
+            Targets = $null
+            CsvPath = ""
+            LogFile = ""
+        }
+    }
+
+    $workDir = Get-BiosWorkDirectory
+    $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+    $csvPath = Join-Path $workDir "$($vendor.VendorKey)-bios-settings-$stamp.csv"
+    $logFile = Join-Path $workDir "$($vendor.VendorKey)-bios-scan-$stamp.log"
+
+    if ($Log) { & $Log "Running ConfigJon $($vendor.VendorKey) BIOS settings scan..." }
+    $result = Invoke-ConfigJonBiosScript -VendorKey $vendor.VendorKey -Mode Get -CsvPath $csvPath -LogFile $logFile
+    foreach ($line in (($result.Output + "`n" + $result.LogText) -split '\r?\n' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -First 80)) {
+        if ($Log) { & $Log ("BIOS: " + $line.Trim()) }
+    }
+    if ($result.ExitCode -ne 0) {
+        throw "BIOS settings scan failed with exit code $($result.ExitCode)."
+    }
+    if (-not (Test-Path -LiteralPath $csvPath)) {
+        throw "BIOS settings scan did not create the expected CSV: $csvPath"
+    }
+
+    $settings = @(Import-Csv -LiteralPath $csvPath)
+    $targets = Resolve-BiosTargetSettings -VendorKey $vendor.VendorKey -Settings $settings -EnableWakeOnLan $EnableWakeOnLan -PowerOnAfterAc $PowerOnAfterAc -DisablePowerBlockers $DisablePowerBlockers
+    if ($Log) {
+        & $Log "BIOS scan complete. Settings found: $($settings.Count); changes available: $($targets.ApplyRows.Count); already correct: $($targets.AlreadyRows.Count); unavailable: $($targets.MissingRows.Count)"
+    }
+
+    return [pscustomobject]@{
+        VendorInfo = $vendor
+        Settings = $settings
+        Targets = $targets
+        CsvPath = $csvPath
+        LogFile = $logFile
+    }
+}
+
+function New-BiosSettingsCsv {
+    param(
+        [Parameter(Mandatory)]$Rows,
+        [Parameter(Mandatory)][string]$Path
+    )
+
+    $outRows = @(
+        foreach ($row in @($Rows)) {
+            [pscustomobject]@{
+                Name = [string]$row.Name
+                Value = [string]$row.Value
+            }
+        }
+    )
+    if ($outRows.Count -eq 0) {
+        throw "No BIOS setting rows were selected for apply."
+    }
+    $outRows | Export-Csv -LiteralPath $Path -NoTypeInformation -Encoding ASCII
+}
+
+function Invoke-BiosSettingsApply {
+    param(
+        [Parameter(Mandatory)]$Scan,
+        [bool]$EnableWakeOnLan = $true,
+        [bool]$PowerOnAfterAc = $true,
+        [bool]$DisablePowerBlockers = $true,
+        [AllowEmptyString()][string]$BiosPassword,
+        [AllowEmptyString()][string]$SystemManagementPassword,
+        [scriptblock]$Log
+    )
+
+    if (-not (Test-IsAdministrator)) {
+        throw "Applying BIOS settings requires PowerShell to be running as Administrator."
+    }
+    if (-not $Scan -or -not $Scan.VendorInfo -or -not $Scan.VendorInfo.Supported) {
+        throw "Run Scan BIOS on a supported Dell, HP, or Lenovo system before applying BIOS prep."
+    }
+
+    $targets = Resolve-BiosTargetSettings -VendorKey $Scan.VendorInfo.VendorKey -Settings $Scan.Settings -EnableWakeOnLan $EnableWakeOnLan -PowerOnAfterAc $PowerOnAfterAc -DisablePowerBlockers $DisablePowerBlockers
+    if ($targets.ApplyRows.Count -eq 0) {
+        return [pscustomobject]@{
+            Changed = $false
+            Targets = $targets
+            Message = "No BIOS changes are needed or supported for the selected options."
+        }
+    }
+
+    $workDir = Get-BiosWorkDirectory
+    $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+    $csvPath = Join-Path $workDir "$($Scan.VendorInfo.VendorKey)-bios-apply-$stamp.csv"
+    $logFile = Join-Path $workDir "$($Scan.VendorInfo.VendorKey)-bios-apply-$stamp.log"
+    New-BiosSettingsCsv -Rows $targets.ApplyRows -Path $csvPath
+
+    if ($Log) { & $Log "Applying $($targets.ApplyRows.Count) BIOS setting(s) with ConfigJon $($Scan.VendorInfo.VendorKey) script..." }
+    $result = Invoke-ConfigJonBiosScript -VendorKey $Scan.VendorInfo.VendorKey -Mode Set -CsvPath $csvPath -LogFile $logFile -BiosPassword $BiosPassword -SystemManagementPassword $SystemManagementPassword
+    foreach ($line in (($result.Output + "`n" + $result.LogText) -split '\r?\n' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -First 120)) {
+        if ($Log) { & $Log ("BIOS: " + $line.Trim()) }
+    }
+    if ($result.ExitCode -ne 0) {
+        throw "BIOS settings apply failed with exit code $($result.ExitCode)."
+    }
+
+    return [pscustomobject]@{
+        Changed = $true
+        Targets = $targets
+        Message = "BIOS prep applied. Reboot the PC, then test Wake-on-LAN and AC power recovery."
+        CsvPath = $csvPath
+        LogFile = $logFile
+    }
+}
+
 function Assert-JetKvmDomain {
     param([AllowEmptyString()][string]$Value)
     if ([string]::IsNullOrWhiteSpace($Value)) { throw "Custom domain is empty." }
@@ -2528,8 +3052,8 @@ function Start-JetFuelGuiV2 {
     $header.Dock = "Fill"
     $header.BackColor = $ui.Surface2
     $header.Padding = New-ScaledPadding 14 8 14 8
-    $iconPath = Join-Path $PSScriptRoot "assets\icon.ico"
-    $logoPath = Join-Path $PSScriptRoot "assets\icon.png"
+    $iconPath = Join-Path (Get-JetFuelScriptRoot) "assets\icon.ico"
+    $logoPath = Join-Path (Get-JetFuelScriptRoot) "assets\icon.png"
     if (Test-Path -LiteralPath $iconPath) {
         try {
             $form.Icon = [Drawing.Icon]::new($iconPath)
@@ -2709,9 +3233,9 @@ function Start-JetFuelGuiV2 {
     $navPanel = [Windows.Forms.TableLayoutPanel]::new()
     $navPanel.Dock = "Fill"
     $navPanel.BackColor = $ui.Window
-    $navPanel.ColumnCount = 6
+    $navPanel.ColumnCount = 7
     $navPanel.RowCount = 1
-    foreach ($width in @(122, 122, 122, 122, 122)) {
+    foreach ($width in @(122, 122, 122, 150, 122, 122)) {
         $navPanel.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, (S $width))) | Out-Null
     }
     $navPanel.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
@@ -2728,6 +3252,10 @@ function Start-JetFuelGuiV2 {
     $identityTabButton.Text = "Identity"
     $identityTabButton.Dock = "Fill"
     $identityTabButton.Margin = New-ScaledPadding 0 0 4 0
+    $biosTabButton = [Windows.Forms.Button]::new()
+    $biosTabButton.Text = "BIOS - WARNING"
+    $biosTabButton.Dock = "Fill"
+    $biosTabButton.Margin = New-ScaledPadding 0 0 4 0
     $settingsTabButton = [Windows.Forms.Button]::new()
     $settingsTabButton.Text = "Settings"
     $settingsTabButton.Dock = "Fill"
@@ -2739,13 +3267,15 @@ function Start-JetFuelGuiV2 {
     Set-ButtonStyle $setupTabButton "Primary"
     Set-ButtonStyle $tailscaleTabButton "Secondary"
     Set-ButtonStyle $identityTabButton "Secondary"
+    Set-ButtonStyle $biosTabButton "Danger"
     Set-ButtonStyle $settingsTabButton "Secondary"
     Set-ButtonStyle $helpTabButton "Secondary"
     $navPanel.Controls.Add($setupTabButton, 0, 0)
     $navPanel.Controls.Add($tailscaleTabButton, 1, 0)
     $navPanel.Controls.Add($identityTabButton, 2, 0)
-    $navPanel.Controls.Add($settingsTabButton, 3, 0)
-    $navPanel.Controls.Add($helpTabButton, 4, 0)
+    $navPanel.Controls.Add($biosTabButton, 3, 0)
+    $navPanel.Controls.Add($settingsTabButton, 4, 0)
+    $navPanel.Controls.Add($helpTabButton, 5, 0)
 
     $pageHost = [Windows.Forms.Panel]::new()
     $pageHost.Dock = "Fill"
@@ -2762,6 +3292,10 @@ function Start-JetFuelGuiV2 {
     $identityPage.Dock = "Fill"
     $identityPage.BackColor = $ui.Window
     $identityPage.AutoScroll = $true
+    $biosPage = [Windows.Forms.Panel]::new()
+    $biosPage.Dock = "Fill"
+    $biosPage.BackColor = $ui.Window
+    $biosPage.AutoScroll = $true
     $settingsPage = [Windows.Forms.Panel]::new()
     $settingsPage.Dock = "Fill"
     $settingsPage.BackColor = $ui.Window
@@ -2829,6 +3363,19 @@ function Start-JetFuelGuiV2 {
     $identityLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::AutoSize)) | Out-Null
     $identityLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::AutoSize)) | Out-Null
     $identityPage.Controls.Add($identityLayout)
+
+    $biosLayout = [Windows.Forms.TableLayoutPanel]::new()
+    $biosLayout.Dock = "Top"
+    $biosLayout.AutoSize = $true
+    $biosLayout.AutoSizeMode = [Windows.Forms.AutoSizeMode]::GrowAndShrink
+    $biosLayout.BackColor = $ui.Window
+    $biosLayout.ColumnCount = 1
+    $biosLayout.RowCount = 4
+    $biosLayout.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
+    for ($i = 0; $i -lt 4; $i++) {
+        $biosLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::AutoSize)) | Out-Null
+    }
+    $biosPage.Controls.Add($biosLayout)
 
     $helpBox = [Windows.Forms.RichTextBox]::new()
     $helpBox.Dock = "Fill"
@@ -2906,6 +3453,25 @@ Identity tab
 - Enabling WOL on the Windows adapter requires Administrator PowerShell and adapter driver support. BIOS/UEFI Wake-on-LAN may still need to be enabled manually. Wired Ethernet is usually more reliable than Wi-Fi.
 - Saving the JetKVM WOL target backs up /userdata/kvm_config.json and offers to reboot JetKVM so the web UI reloads the Wake on LAN device list.
 
+BIOS - WARNING tab
+- This is an optional local PC prep tool. It is not part of the JetKVM Tailscale install and never runs automatically.
+- It uses bundled pinned copies of ConfigJon Firmware-Management scripts for Dell, HP, and Lenovo systems.
+- Credit: BIOS scan/apply is powered by ConfigJon Firmware-Management, bundled under its MIT license.
+- Scan BIOS reads local firmware settings and reports what JetFUEL would change before anything is written.
+- Apply BIOS prep can enable BIOS Wake-on-LAN, set power-on-after-AC-restore, and disable known deep sleep/power-saving settings that can block Wake-on-LAN.
+- JetFUEL does not change PXE/network boot order.
+- BIOS passwords are typed for the current run only. They are passed to the child process through environment variables, redacted from logs, and not saved by JetFUEL.
+- Firmware setting names vary by model. Unsupported or missing settings are reported and skipped.
+- Vendor tooling/resources:
+  - BIOS tool: https://github.com/ConfigJon/Firmware-Management
+  - ConfigJon site: https://www.configjon.com/
+  - Lenovo direct download: https://download.lenovo.com/pccbbs/thinkvantage_en/system_update_5.08.03.59.exe
+  - Lenovo download page: https://support.lenovo.com/gb/en/solutions/ht037099
+  - HP direct download: https://ftp.hp.com/pub/softpaq/sp143501-144000/sp143621.exe
+  - HP download page: https://ftp.ext.hp.com/pub/caps-softpaq/cmit/HP_BCU.html
+  - Dell direct download: model-specific; use Dell Support for the target model/service tag.
+  - Dell download page: https://www.dell.com/support/contents/en-uk/article/product-support/self-support-knowledgebase/fix-common-issues/bios-uefi
+
 Settings tab
 - Custom script URL is only used when Step 3 is set to Custom URL.
 - Local script file is only used when Step 3 is set to Local file.
@@ -2934,23 +3500,26 @@ Status log
 "@
     $helpPage.Controls.Add($helpBox)
 
-    $pageHost.Controls.AddRange(@($helpPage, $settingsPage, $identityPage, $tailscalePage, $setupPage))
+    $pageHost.Controls.AddRange(@($helpPage, $settingsPage, $biosPage, $identityPage, $tailscalePage, $setupPage))
     $showPage = {
         param([string]$Name)
         $setupPage.Visible = ($Name -eq "Setup")
         $tailscalePage.Visible = ($Name -eq "Tailscale")
         $identityPage.Visible = ($Name -eq "Identity")
+        $biosPage.Visible = ($Name -eq "BIOS")
         $settingsPage.Visible = ($Name -eq "Settings")
         $helpPage.Visible = ($Name -eq "Help")
         Set-ButtonStyle $setupTabButton $(if ($Name -eq "Setup") { "Primary" } else { "Secondary" })
         Set-ButtonStyle $tailscaleTabButton $(if ($Name -eq "Tailscale") { "Primary" } else { "Secondary" })
         Set-ButtonStyle $identityTabButton $(if ($Name -eq "Identity") { "Primary" } else { "Secondary" })
+        Set-ButtonStyle $biosTabButton "Danger"
         Set-ButtonStyle $settingsTabButton $(if ($Name -eq "Settings") { "Primary" } else { "Secondary" })
         Set-ButtonStyle $helpTabButton $(if ($Name -eq "Help") { "Primary" } else { "Secondary" })
     }
     $setupTabButton.Add_Click({ & $showPage "Setup" })
     $tailscaleTabButton.Add_Click({ & $showPage "Tailscale" })
     $identityTabButton.Add_Click({ & $showPage "Identity" })
+    $biosTabButton.Add_Click({ & $showPage "BIOS" })
     $settingsTabButton.Add_Click({ & $showPage "Settings" })
     $helpTabButton.Add_Click({ & $showPage "Help" })
 
@@ -3443,6 +4012,144 @@ Status log
     $usbStatusLabel.Text = "USB identity: JetKVM presets loaded; scan PC to add local USB candidates"
     $usbStatusLabel.ForeColor = $ui.Info
 
+    $biosManifest = Get-ConfigJonBiosManifest
+    $biosSourceText = if ($biosManifest) {
+        "Bundled ConfigJon Firmware-Management scripts from commit $($biosManifest.upstream_commit). Dell/HP/Lenovo only; PXE boot order is report-only and is not changed."
+    } else {
+        "Bundled ConfigJon Firmware-Management metadata was not found. Scan/apply will still check for the required vendor script files."
+    }
+
+    $biosWarningGroup = New-Group "BIOS prep warning"
+    & $makeGroupAutoHeight $biosWarningGroup
+    $biosWarningGroup.BackColor = [Drawing.Color]::FromArgb(69, 10, 10)
+    $biosWarningGroup.ForeColor = [Drawing.Color]::FromArgb(254, 202, 202)
+    $biosWarningGrid = New-StepGrid 3
+    $biosWarningGrid.RowStyles.Clear()
+    foreach ($height in @(44, 32, 28)) {
+        $biosWarningGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, (S $height))) | Out-Null
+    }
+    $biosWarningGroup.Controls.Add($biosWarningGrid)
+    $biosWarningLabel = [Windows.Forms.Label]::new()
+    $biosWarningLabel.Text = "This changes BIOS/UEFI settings on the Windows PC running JetFUEL, not on the JetKVM. Scan first, review the report, and only apply on machines you are allowed to manage."
+    $biosWarningLabel.Dock = "Fill"
+    $biosWarningLabel.ForeColor = [Drawing.Color]::FromArgb(255, 245, 245)
+    $biosWarningLabel.Font = [Drawing.Font]::new("Segoe UI", 9, [Drawing.FontStyle]::Bold)
+    $biosWarningLabel.AutoEllipsis = $true
+    $biosWarningSource = New-RowLabel $biosSourceText
+    $biosWarningSource.ForeColor = [Drawing.Color]::FromArgb(254, 202, 202)
+    $biosPasswordNote = New-RowLabel "BIOS passwords are optional, used for this run only, passed through child-process environment variables, redacted from logs, and never saved by JetFUEL."
+    $biosPasswordNote.ForeColor = [Drawing.Color]::FromArgb(253, 230, 138)
+    $biosWarningGrid.Controls.Add($biosWarningLabel, 0, 0)
+    $biosWarningGrid.SetColumnSpan($biosWarningLabel, 3)
+    $biosWarningGrid.Controls.Add($biosWarningSource, 0, 1)
+    $biosWarningGrid.SetColumnSpan($biosWarningSource, 3)
+    $biosWarningGrid.Controls.Add($biosPasswordNote, 0, 2)
+    $biosWarningGrid.SetColumnSpan($biosPasswordNote, 3)
+    $biosLayout.Controls.Add($biosWarningGroup, 0, 0)
+
+    $biosDetectGroup = New-Group "Detected local PC BIOS"
+    & $makeGroupAutoHeight $biosDetectGroup
+    $biosDetectGrid = New-StepGrid 7
+    $biosDetectGrid.RowStyles.Clear()
+    foreach ($height in @(30, 30, 30, 30, 30, 30, 34)) {
+        $biosDetectGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, (S $height))) | Out-Null
+    }
+    $biosDetectGroup.Controls.Add($biosDetectGrid)
+    $biosVendorValue = New-RowLabel "Not scanned"
+    $biosModelValue = New-RowLabel "Not scanned"
+    $biosVersionValue = New-RowLabel "Not scanned"
+    $biosSupportValue = New-RowLabel "Not scanned"
+    $biosPasswordBox = New-Field ""
+    $biosPasswordBox.UseSystemPasswordChar = $true
+    $biosSmPasswordBox = New-Field ""
+    $biosSmPasswordBox.UseSystemPasswordChar = $true
+    $scanBiosButton = [Windows.Forms.Button]::new()
+    $scanBiosButton.Text = "Scan BIOS"
+    $scanBiosButton.Dock = "Fill"
+    $scanBiosButton.Margin = New-ScaledPadding 8 2 8 2
+    Set-ButtonStyle $scanBiosButton "Secondary"
+    $applyBiosButton = [Windows.Forms.Button]::new()
+    $applyBiosButton.Text = "Apply BIOS prep"
+    $applyBiosButton.Dock = "Fill"
+    $applyBiosButton.Margin = New-ScaledPadding 8 2 8 2
+    $applyBiosButton.Enabled = $false
+    Set-ButtonStyle $applyBiosButton "Danger"
+    $biosDetectGrid.Controls.Add((New-RowLabel "Manufacturer"), 0, 0)
+    $biosDetectGrid.Controls.Add($biosVendorValue, 1, 0)
+    $biosDetectGrid.Controls.Add($scanBiosButton, 2, 0)
+    $biosDetectGrid.SetRowSpan($scanBiosButton, 2)
+    $biosDetectGrid.Controls.Add((New-RowLabel "Model"), 0, 1)
+    $biosDetectGrid.Controls.Add($biosModelValue, 1, 1)
+    $biosDetectGrid.Controls.Add((New-RowLabel "BIOS version"), 0, 2)
+    $biosDetectGrid.Controls.Add($biosVersionValue, 1, 2)
+    $biosDetectGrid.Controls.Add($applyBiosButton, 2, 2)
+    $biosDetectGrid.SetRowSpan($applyBiosButton, 2)
+    $biosDetectGrid.Controls.Add((New-RowLabel "Support"), 0, 3)
+    $biosDetectGrid.Controls.Add($biosSupportValue, 1, 3)
+    $biosDetectGrid.Controls.Add((New-RowLabel "BIOS password"), 0, 4)
+    $biosDetectGrid.Controls.Add($biosPasswordBox, 1, 4)
+    $biosDetectGrid.SetColumnSpan($biosPasswordBox, 2)
+    $biosDetectGrid.Controls.Add((New-RowLabel "Lenovo SM password"), 0, 5)
+    $biosDetectGrid.Controls.Add($biosSmPasswordBox, 1, 5)
+    $biosDetectGrid.SetColumnSpan($biosSmPasswordBox, 2)
+    $biosDetectGrid.Controls.Add((New-RowLabel "Password note"), 0, 6)
+    $biosLenovoNote = New-RowLabel "Leave passwords blank unless the local PC firmware already has one set. Lenovo system-management password is optional and Lenovo-only."
+    $biosLenovoNote.ForeColor = $ui.Muted
+    $biosDetectGrid.Controls.Add($biosLenovoNote, 1, 6)
+    $biosDetectGrid.SetColumnSpan($biosLenovoNote, 2)
+    $biosLayout.Controls.Add($biosDetectGroup, 0, 1)
+
+    $biosOptionsGroup = New-Group "Recommended BIOS prep"
+    & $makeGroupAutoHeight $biosOptionsGroup
+    $biosOptionsGrid = New-StepGrid 5
+    $biosOptionsGrid.RowStyles.Clear()
+    foreach ($height in @(30, 30, 30, 30, 30)) {
+        $biosOptionsGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, (S $height))) | Out-Null
+    }
+    $biosOptionsGroup.Controls.Add($biosOptionsGrid)
+    $biosWolCheck = [Windows.Forms.CheckBox]::new()
+    $biosWolCheck.Text = "Enable BIOS Wake-on-LAN support"
+    $biosWolCheck.Checked = $true
+    $biosWolCheck.Dock = "Fill"
+    Set-CheckStyle $biosWolCheck
+    $biosAcPowerCheck = [Windows.Forms.CheckBox]::new()
+    $biosAcPowerCheck.Text = "Power on after AC power is restored"
+    $biosAcPowerCheck.Checked = $true
+    $biosAcPowerCheck.Dock = "Fill"
+    Set-CheckStyle $biosAcPowerCheck
+    $biosPowerBlockersCheck = [Windows.Forms.CheckBox]::new()
+    $biosPowerBlockersCheck.Text = "Disable known deep sleep / power-saving settings that can block WOL"
+    $biosPowerBlockersCheck.Checked = $true
+    $biosPowerBlockersCheck.Dock = "Fill"
+    Set-CheckStyle $biosPowerBlockersCheck
+    $biosPxeNote = New-RowLabel "PXE/network boot settings are not changed by JetFUEL. Firmware setting names vary by model; missing settings are skipped and shown in the report."
+    $biosPxeNote.ForeColor = $ui.Warn
+    $biosOptionsGrid.Controls.Add($biosWolCheck, 1, 0)
+    $biosOptionsGrid.SetColumnSpan($biosWolCheck, 2)
+    $biosOptionsGrid.Controls.Add($biosAcPowerCheck, 1, 1)
+    $biosOptionsGrid.SetColumnSpan($biosAcPowerCheck, 2)
+    $biosOptionsGrid.Controls.Add($biosPowerBlockersCheck, 1, 2)
+    $biosOptionsGrid.SetColumnSpan($biosPowerBlockersCheck, 2)
+    $biosOptionsGrid.Controls.Add($biosPxeNote, 0, 3)
+    $biosOptionsGrid.SetColumnSpan($biosPxeNote, 3)
+    $biosLayout.Controls.Add($biosOptionsGroup, 0, 2)
+
+    $biosReportGroup = New-Group "BIOS scan report"
+    $biosReportGroup.Dock = "Top"
+    $biosReportGroup.Height = S 220
+    $biosReportBox = [Windows.Forms.RichTextBox]::new()
+    $biosReportBox.Dock = "Fill"
+    $biosReportBox.ReadOnly = $true
+    $biosReportBox.WordWrap = $false
+    $biosReportBox.ScrollBars = "Both"
+    $biosReportBox.BorderStyle = "FixedSingle"
+    $biosReportBox.BackColor = $ui.Log
+    $biosReportBox.ForeColor = $ui.Text
+    $biosReportBox.Font = [Drawing.Font]::new("Consolas", 9)
+    $biosReportBox.Text = "Click Scan BIOS to detect Dell/HP/Lenovo firmware support and preview the settings JetFUEL can change."
+    $biosReportGroup.Controls.Add($biosReportBox)
+    $biosLayout.Controls.Add($biosReportGroup, 0, 3)
+
     $settingsGroup = New-Group "Installer sources"
     & $makeGroupAutoHeight $settingsGroup
     $settingsGrid = New-StepGrid 8
@@ -3458,7 +4165,7 @@ Status log
     $browseInstallerButton.Text = "Browse"
     $browseInstallerButton.Dock = "Fill"
     Set-ButtonStyle $browseInstallerButton "Secondary"
-    $metadataPath = Join-Path $PSScriptRoot "install-tailscale.metadata.json"
+    $metadataPath = Join-Path (Get-JetFuelScriptRoot) "install-tailscale.metadata.json"
     $metadataText = "JetFUEL repo reference copy metadata not found."
     if (Test-Path -LiteralPath $metadataPath) {
         try {
@@ -3683,6 +4390,10 @@ Status log
         [Windows.Forms.Application]::DoEvents()
     }
 
+    $biosState = [pscustomobject]@{
+        Scan = $null
+    }
+
     $setBusy = {
         param([bool]$Busy, [string]$Status)
         $runButton.Enabled = -not $Busy
@@ -3700,6 +4411,8 @@ Status log
         $applyEdidButton.Enabled = (-not $Busy) -and $displayChoiceBox.Enabled -and ($null -ne $displayChoiceBox.SelectedItem)
         $applyUsbButton.Enabled = (-not $Busy) -and $usbChoiceBox.Enabled -and ($null -ne $usbChoiceBox.SelectedItem)
         $applyDeviceSettingsButton.Enabled = -not $Busy
+        $scanBiosButton.Enabled = -not $Busy
+        $applyBiosButton.Enabled = (-not $Busy) -and $biosState.Scan -and $biosState.Scan.VendorInfo.Supported -and $biosState.Scan.Targets -and ($biosState.Scan.Targets.ApplyRows.Count -gt 0)
         $exitButton.Enabled = -not $Busy
         $statusLabel.Text = $Status
         [Windows.Forms.Application]::DoEvents()
@@ -3719,6 +4432,133 @@ Status log
         }
         [Windows.Forms.Application]::DoEvents()
     }
+
+    $refreshBiosReport = {
+        param($Scan)
+        if (-not $Scan) {
+            $biosVendorValue.Text = "Not scanned"
+            $biosModelValue.Text = "Not scanned"
+            $biosVersionValue.Text = "Not scanned"
+            $biosSupportValue.Text = "Not scanned"
+            $biosSupportValue.ForeColor = $ui.Muted
+            $biosReportBox.Text = "Click Scan BIOS to detect Dell/HP/Lenovo firmware support and preview the settings JetFUEL can change."
+            $applyBiosButton.Enabled = $false
+            return
+        }
+
+        $vendor = $Scan.VendorInfo
+        $biosVendorValue.Text = if ($vendor.Manufacturer) { $vendor.Manufacturer } else { "Unknown" }
+        $biosModelValue.Text = if ($vendor.Model) { $vendor.Model } else { "Unknown" }
+        $biosVersionValue.Text = if ($vendor.BiosVersion) { $vendor.BiosVersion } else { "Unknown" }
+        if ($vendor.Supported) {
+            $biosSupportValue.Text = "$($vendor.DisplayVendor) supported"
+            $biosSupportValue.ForeColor = $ui.Good
+            $Scan.Targets = Resolve-BiosTargetSettings -VendorKey $vendor.VendorKey -Settings $Scan.Settings -EnableWakeOnLan $biosWolCheck.Checked -PowerOnAfterAc $biosAcPowerCheck.Checked -DisablePowerBlockers $biosPowerBlockersCheck.Checked
+            $biosReportBox.Text = Format-BiosTargetReport -VendorInfo $vendor -Targets $Scan.Targets
+            $applyBiosButton.Enabled = ($Scan.Targets.ApplyRows.Count -gt 0)
+        } else {
+            $biosSupportValue.Text = "Unsupported manufacturer"
+            $biosSupportValue.ForeColor = $ui.Warn
+            $biosReportBox.Text = "This BIOS manufacturer is not supported by the bundled ConfigJon scripts.`r`n`r`nDetected: $($vendor.Manufacturer) $($vendor.Model)`r`n`r`nSupported vendors: Dell, HP, Lenovo."
+            $applyBiosButton.Enabled = $false
+        }
+    }
+
+    $biosOptionChanged = {
+        if ($biosState.Scan) {
+            & $refreshBiosReport $biosState.Scan
+        }
+    }
+    $biosWolCheck.Add_CheckedChanged($biosOptionChanged)
+    $biosAcPowerCheck.Add_CheckedChanged($biosOptionChanged)
+    $biosPowerBlockersCheck.Add_CheckedChanged($biosOptionChanged)
+
+    $scanBiosButton.Add_Click({
+        try {
+            & $setBusy $true "Scanning BIOS..."
+            & $log "--- BIOS prep scan ---"
+            $scan = Invoke-BiosSettingsScan -EnableWakeOnLan $biosWolCheck.Checked -PowerOnAfterAc $biosAcPowerCheck.Checked -DisablePowerBlockers $biosPowerBlockersCheck.Checked -Log $log
+            $biosState.Scan = $scan
+            & $refreshBiosReport $scan
+            if ($scan.VendorInfo.Supported) {
+                & $setBusy $false "BIOS scan complete"
+            } else {
+                & $setBusy $false "BIOS unsupported"
+                [Windows.Forms.MessageBox]::Show(
+                    "This local PC manufacturer is not currently supported for BIOS prep.`r`n`r`nDetected: $($scan.VendorInfo.Manufacturer) $($scan.VendorInfo.Model)`r`n`r`nSupported vendors: Dell, HP, Lenovo.",
+                    "BIOS unsupported",
+                    "OK",
+                    "Warning"
+                ) | Out-Null
+            }
+        } catch {
+            $biosState.Scan = $null
+            & $refreshBiosReport $null
+            & $log ("ERROR: " + $_.Exception.Message)
+            & $setBusy $false "Failed"
+            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null
+        }
+    })
+
+    $applyBiosButton.Add_Click({
+        try {
+            if (-not $biosState.Scan) { throw "Run Scan BIOS before applying BIOS prep." }
+            if (-not $biosState.Scan.VendorInfo.Supported) { throw "This PC vendor is not supported for BIOS prep." }
+            & $refreshBiosReport $biosState.Scan
+            $targets = $biosState.Scan.Targets
+            if (-not $targets -or $targets.ApplyRows.Count -eq 0) {
+                [Windows.Forms.MessageBox]::Show("No BIOS changes are needed or available for the selected options.", "BIOS prep", "OK", "Information") | Out-Null
+                return
+            }
+
+            $summary = @(
+                "Vendor: $($biosState.Scan.VendorInfo.DisplayVendor)",
+                "Model: $($biosState.Scan.VendorInfo.Model)",
+                "",
+                "Settings to write:"
+            )
+            foreach ($row in $targets.ApplyRows) {
+                $summary += " - $($row.Name) = $($row.Value) ($($row.Reason))"
+            }
+            $summary += ""
+            $summary += "PXE/network boot order will not be changed."
+            $summary += "BIOS passwords are used only for this run and are not saved."
+
+            $answer = [Windows.Forms.MessageBox]::Show(
+                "Apply BIOS prep to this local Windows PC?`r`n`r`n$($summary -join "`r`n")`r`n`r`nThis writes firmware settings. Continue only if you are allowed to manage this machine.",
+                "Apply BIOS prep",
+                "YesNo",
+                "Warning"
+            )
+            if ($answer -ne [Windows.Forms.DialogResult]::Yes) {
+                & $log "BIOS prep cancelled."
+                return
+            }
+
+            & $setBusy $true "Applying BIOS prep..."
+            & $log "--- BIOS prep apply ---"
+            $result = Invoke-BiosSettingsApply -Scan $biosState.Scan -EnableWakeOnLan $biosWolCheck.Checked -PowerOnAfterAc $biosAcPowerCheck.Checked -DisablePowerBlockers $biosPowerBlockersCheck.Checked -BiosPassword $biosPasswordBox.Text -SystemManagementPassword $biosSmPasswordBox.Text -Log $log
+            $biosPasswordBox.Text = ""
+            $biosSmPasswordBox.Text = ""
+            if ($result.Changed) {
+                & $log $result.Message
+                [Windows.Forms.MessageBox]::Show($result.Message, "BIOS prep complete", "OK", "Information") | Out-Null
+            } else {
+                & $log $result.Message
+                [Windows.Forms.MessageBox]::Show($result.Message, "BIOS prep", "OK", "Information") | Out-Null
+            }
+
+            $biosState.Scan = Invoke-BiosSettingsScan -EnableWakeOnLan $biosWolCheck.Checked -PowerOnAfterAc $biosAcPowerCheck.Checked -DisablePowerBlockers $biosPowerBlockersCheck.Checked -Log $log
+            & $refreshBiosReport $biosState.Scan
+            & $setBusy $false "BIOS prep complete"
+        } catch {
+            $biosPasswordBox.Text = ""
+            $biosSmPasswordBox.Text = ""
+            & $log ("ERROR: " + $_.Exception.Message)
+            & $setBusy $false "Failed"
+            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null
+        }
+    })
 
     $noPassCheck.Add_CheckedChanged({
         $passBox.Enabled = -not $noPassCheck.Checked

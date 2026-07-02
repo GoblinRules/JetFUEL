@@ -1,0 +1,28 @@
+{
+  "name": "ConfigJon Firmware-Management",
+  "upstream_repo": "https://github.com/ConfigJon/Firmware-Management",
+  "upstream_site": "https://www.configjon.com/",
+  "upstream_commit": "d95f801b53599438a9173b7e8a544cf5b9438343",
+  "fetched_utc": "2026-07-02T00:00:00Z",
+  "license": "MIT",
+  "files": [
+    {
+      "vendor": "Dell",
+      "path": "Dell/Manage-DellBiosSettings-WMI.ps1",
+      "script_version": "2.3.0",
+      "sha256": "EEE2EB46708B0CF709B0A58E038832313A61CC7A4E275C861B976D642375677A"
+    },
+    {
+      "vendor": "HP",
+      "path": "HP/Manage-HPBiosSettings-WMI.ps1",
+      "script_version": "2.3.1",
+      "sha256": "7D08F83DDACE31D947EB90116F3F4D18EEB80A04BE986CD2732F3D31D5BCE578"
+    },
+    {
+      "vendor": "Lenovo",
+      "path": "Lenovo/Manage-LenovoBiosSettings.ps1",
+      "script_version": "2.3.0",
+      "sha256": "403017C369B40F599CBFF0B24A85B0554E133B7F2542EC1B2F996D62B0F77F40"
+    }
+  ]
+}
