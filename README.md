@@ -51,6 +51,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\JetFuel.ps1
 - Provides an Identity tab for JetKVM MAC status, generated local-administered MAC profiles, custom MAC override, and clearing the user override.
 - Loads JetKVM's default EDID/USB identity presets, scans the Windows PC for monitor EDID and USB keyboard/mouse VID/PID candidates, then lets you choose human-readable display and USB identity candidates.
 - Applies selected EDID and USB identity values to JetKVM by backing up and updating `/userdata/kvm_config.json` over SSH, then offering to reboot JetKVM so the values load.
+- Scans this Windows PC for network adapters, optionally enables Wake-on-LAN on the selected adapter, and adds the PC as a JetKVM Wake on LAN target.
 - Applies optional JetKVM device defaults for auto update, keyboard layout, display brightness/timers, HDMI sleep, network hostname/domain, mDNS, and IPv6 mode.
 - When a network hostname is enabled, writes JetKVM's runtime `/etc/hostname` and `/etc/hosts` as well as config, then offers a reboot so DHCP startup can use the new name.
 
@@ -73,6 +74,19 @@ See [docs/edid-selector-plan.md](docs/edid-selector-plan.md).
 JetFUEL is also tracking broader JetKVM identity options for display EDID, USB keyboard/mouse identity, and advanced MAC address override. See [docs/device-identity-plan.md](docs/device-identity-plan.md).
 
 Current identity support includes generated MAC profiles such as Android/media, Fire TV/streaming, TP-Link smart plug/IoT, and generic IoT. These profiles use local-administered generated MAC addresses by default; JetFUEL does not clone the Windows PC MAC address.
+
+## Wake-on-LAN Target Setup
+
+JetFUEL can help set up the JetKVM Wake on LAN button for the Windows PC running the wizard.
+
+On the Identity tab:
+
+- `Scan NICs` finds physical Windows network adapters, prefers active/default-route wired adapters, formats the MAC address, and calculates the IPv4 broadcast address.
+- `Set up WOL` can optionally enable Wake-on-LAN on the selected Windows adapter, then writes the PC name, MAC, and broadcast IP into JetKVM's `wake_on_lan_devices` config list.
+
+Local WOL enablement requires PowerShell as Administrator and a NIC driver that exposes Wake-on-Magic-Packet settings. Many PCs also need Wake-on-LAN enabled in BIOS/UEFI. Wired Ethernet is usually more reliable than Wi-Fi for WOL.
+
+The JetKVM target write creates a timestamped backup of `/userdata/kvm_config.json` and then offers to reboot JetKVM so the web UI reloads the Wake on LAN device list.
 
 ## Wizard Flow
 
@@ -156,6 +170,7 @@ Use the red `EXIT` button in the wizard header when you are finished.
 - Tailscale auth keys must be full pre-authentication secrets beginning with `tskey-auth-`. The key ID ending in `CNTRL` is not enough.
 - Tailscale installation may fail if the JetKVM itself is set up/authenticated using Google auth. Use local JetKVM authentication for this SSH/Developer Mode flow.
 - If SSH login fails, confirm Developer Mode is enabled, the public key was saved in JetKVM Settings > Advanced, and the selected private key matches the public key.
+- If Wake-on-LAN does not wake the Windows PC, confirm WOL is enabled in BIOS/UEFI, Windows adapter power management, and the NIC advanced driver settings. Prefer wired Ethernet. Some Wi-Fi adapters and USB Ethernet adapters cannot wake a fully powered-off PC.
 
 ## Disclaimer
 

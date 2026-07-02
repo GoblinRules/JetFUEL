@@ -1421,6 +1421,233 @@ function Update-JetKvmConfigProperty {
     Save-JetKvmConfigObject -JetKvmAddress $JetKvmAddress -KeyPath $KeyPath -Config $config -Log $Log
 }
 
+function Test-IPv4Address {
+    param([AllowEmptyString()][string]$Value)
+
+    if ([string]::IsNullOrWhiteSpace($Value)) { return $false }
+    $ip = $null
+    if (-not [Net.IPAddress]::TryParse($Value.Trim(), [ref]$ip)) { return $false }
+    return $ip.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetwork
+}
+
+function Get-IPv4BroadcastAddress {
+    param(
+        [Parameter(Mandatory)][string]$IPAddress,
+        [Parameter(Mandatory)][int]$PrefixLength
+    )
+
+    if (-not (Test-IPv4Address -Value $IPAddress)) { return "" }
+    if ($PrefixLength -lt 0 -or $PrefixLength -gt 32) { return "" }
+
+    $bytes = [Net.IPAddress]::Parse($IPAddress).GetAddressBytes()
+    [Array]::Reverse($bytes)
+    $ipInt = [BitConverter]::ToUInt32($bytes, 0)
+    $hostMask = if ($PrefixLength -eq 32) { [uint32]0 } else { [uint32]([Math]::Pow(2, 32 - $PrefixLength) - 1) }
+    $broadcast = [uint32]($ipInt -bor $hostMask)
+    $outBytes = [BitConverter]::GetBytes($broadcast)
+    [Array]::Reverse($outBytes)
+    return (($outBytes | ForEach-Object { $_.ToString() }) -join ".")
+}
+
+function Get-LocalWakeOnLanAdapters {
+    $getNetAdapter = Get-Command Get-NetAdapter -ErrorAction SilentlyContinue
+    if (-not $getNetAdapter) {
+        throw "Get-NetAdapter is not available on this Windows system."
+    }
+
+    $defaultIndexes = @()
+    try {
+        $defaultIndexes = @(
+            Get-NetRoute -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue |
+                Sort-Object RouteMetric, InterfaceMetric |
+                Select-Object -ExpandProperty ifIndex -Unique
+        )
+    } catch {}
+
+    $adapters = @(
+        Get-NetAdapter -Physical -ErrorAction Stop |
+            Where-Object { $_.MacAddress -and $_.Status -ne "Disabled" }
+    )
+
+    $results = New-Object System.Collections.Generic.List[object]
+    foreach ($adapter in $adapters) {
+        $ipAddress = ""
+        $prefixLength = $null
+        $gateway = ""
+        $broadcast = ""
+        try {
+            $ipConfig = Get-NetIPConfiguration -InterfaceIndex $adapter.ifIndex -ErrorAction SilentlyContinue
+            $ipv4 = @($ipConfig.IPv4Address | Where-Object {
+                $_.IPAddress -and $_.IPAddress -notlike "169.254.*"
+            } | Select-Object -First 1)
+            if ($ipv4.Count -gt 0) {
+                $ipAddress = [string]$ipv4[0].IPAddress
+                $prefixLength = [int]$ipv4[0].PrefixLength
+                $broadcast = Get-IPv4BroadcastAddress -IPAddress $ipAddress -PrefixLength $prefixLength
+            }
+            if ($ipConfig.IPv4DefaultGateway -and $ipConfig.IPv4DefaultGateway.NextHop) {
+                $gateway = [string]$ipConfig.IPv4DefaultGateway.NextHop
+            }
+        } catch {}
+
+        $isDefault = $defaultIndexes -contains $adapter.ifIndex
+        $isWireless = (
+            $adapter.Name -match 'wi-?fi|wireless|wlan' -or
+            $adapter.InterfaceDescription -match 'wi-?fi|wireless|wlan|802\.11'
+        )
+        $score = 0
+        if ($adapter.Status -eq "Up") { $score += 50 }
+        if ($isDefault) { $score += 100 }
+        if (-not [string]::IsNullOrWhiteSpace($ipAddress)) { $score += 25 }
+        if (-not $isWireless) { $score += 20 }
+
+        $mac = Format-MacAddress -Value $adapter.MacAddress
+        $displayParts = @($adapter.Name, $mac)
+        if ($ipAddress) { $displayParts += $ipAddress }
+        if ($isDefault) { $displayParts += "default route" }
+        if ($isWireless) { $displayParts += "wireless" }
+
+        $results.Add([pscustomobject]@{
+            Name = [string]$adapter.Name
+            InterfaceDescription = [string]$adapter.InterfaceDescription
+            InterfaceIndex = [int]$adapter.ifIndex
+            Status = [string]$adapter.Status
+            MacAddress = $mac
+            IPAddress = $ipAddress
+            PrefixLength = $prefixLength
+            BroadcastIP = $broadcast
+            Gateway = $gateway
+            IsDefaultRoute = [bool]$isDefault
+            IsWireless = [bool]$isWireless
+            Score = $score
+            DisplayName = ($displayParts -join " | ")
+        }) | Out-Null
+    }
+
+    return @($results | Sort-Object -Property @{ Expression = "Score"; Descending = $true }, "Name")
+}
+
+function Enable-LocalAdapterWakeOnLan {
+    param(
+        [Parameter(Mandatory)][string]$AdapterName,
+        [Parameter(Mandatory)][string]$AdapterDescription,
+        [scriptblock]$Log
+    )
+
+    if (-not (Test-IsAdministrator)) {
+        throw "Enabling Wake-on-LAN on this Windows PC requires PowerShell to be running as Administrator."
+    }
+
+    $changes = 0
+
+    if (Get-Command Set-NetAdapterPowerManagement -ErrorAction SilentlyContinue) {
+        try {
+            Set-NetAdapterPowerManagement -Name $AdapterName -WakeOnMagicPacket Enabled -ErrorAction Stop
+            if ($Log) { & $Log "Enabled Windows adapter WakeOnMagicPacket for '$AdapterName'." }
+            $changes++
+        } catch {
+            if ($Log) { & $Log "Warning: could not set WakeOnMagicPacket on '$AdapterName': $(Get-CleanExceptionMessage -ErrorRecord $_)" }
+        }
+    }
+
+    if (Get-Command Get-NetAdapterAdvancedProperty -ErrorAction SilentlyContinue) {
+        $advanced = @()
+        try { $advanced = @(Get-NetAdapterAdvancedProperty -Name $AdapterName -ErrorAction SilentlyContinue) } catch {}
+        foreach ($pattern in @('^Wake on Magic Packet$', '^Shutdown Wake[- ]On[- ]Lan$', '^Wake on Magic Packet from power off state$')) {
+            $property = $advanced | Where-Object { $_.DisplayName -match $pattern } | Select-Object -First 1
+            if ($property) {
+                try {
+                    Set-NetAdapterAdvancedProperty -Name $AdapterName -DisplayName $property.DisplayName -DisplayValue "Enabled" -ErrorAction Stop
+                    if ($Log) { & $Log "Enabled adapter advanced property '$($property.DisplayName)'." }
+                    $changes++
+                } catch {
+                    if ($Log) { & $Log "Warning: could not enable '$($property.DisplayName)': $(Get-CleanExceptionMessage -ErrorRecord $_)" }
+                }
+            }
+        }
+    }
+
+    $powercfg = Get-Command powercfg.exe -ErrorAction SilentlyContinue
+    if ($powercfg -and -not [string]::IsNullOrWhiteSpace($AdapterDescription)) {
+        try {
+            $output = & $powercfg.Source /deviceenablewake "$AdapterDescription" 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                if ($Log) { & $Log "Enabled wake permission with powercfg for '$AdapterDescription'." }
+                $changes++
+            } elseif ($Log) {
+                & $Log "Warning: powercfg could not enable wake for '$AdapterDescription': $($output -join ' ')"
+            }
+        } catch {
+            if ($Log) { & $Log "Warning: powercfg wake enable failed: $(Get-CleanExceptionMessage -ErrorRecord $_)" }
+        }
+    }
+
+    if ($changes -eq 0) {
+        throw "No Wake-on-LAN setting could be enabled for '$AdapterName'. The adapter driver may not expose WoL settings, or BIOS/UEFI may need manual configuration."
+    }
+
+    if ($Log) {
+        & $Log "Windows WoL configuration attempted for '$AdapterName'. Confirm BIOS/UEFI also has Wake-on-LAN enabled."
+    }
+}
+
+function ConvertTo-WakeOnLanDeviceName {
+    param([AllowEmptyString()][string]$Value)
+
+    $clean = ([string]$Value -replace '[\x00-\x1F\x7F]', '').Trim()
+    if ([string]::IsNullOrWhiteSpace($clean)) { $clean = $env:COMPUTERNAME }
+    if ([string]::IsNullOrWhiteSpace($clean)) { $clean = "Windows PC" }
+    if ($clean.Length -gt 64) { $clean = $clean.Substring(0, 64) }
+    return $clean
+}
+
+function Update-JetKvmWakeOnLanDevice {
+    param(
+        [Parameter(Mandatory)][string]$JetKvmAddress,
+        [Parameter(Mandatory)][string]$KeyPath,
+        [Parameter(Mandatory)][string]$DeviceName,
+        [Parameter(Mandatory)][string]$MacAddress,
+        [AllowEmptyString()][string]$BroadcastIP,
+        [scriptblock]$Log
+    )
+
+    $DeviceName = ConvertTo-WakeOnLanDeviceName -Value $DeviceName
+    $MacAddress = Format-MacAddress -Value $MacAddress
+    Assert-MacAddress -MacAddress $MacAddress
+    if (-not [string]::IsNullOrWhiteSpace($BroadcastIP) -and -not (Test-IPv4Address -Value $BroadcastIP)) {
+        throw "Broadcast IP must be a valid IPv4 address, or left blank."
+    }
+
+    $config = Get-JetKvmConfigObject -JetKvmAddress $JetKvmAddress -KeyPath $KeyPath
+    $existing = @()
+    if ($config.PSObject.Properties["wake_on_lan_devices"] -and $null -ne $config.wake_on_lan_devices) {
+        $existing = @($config.wake_on_lan_devices)
+    }
+
+    $devices = New-Object System.Collections.Generic.List[object]
+    foreach ($device in $existing) {
+        $existingMac = ""
+        $existingName = ""
+        if ($device.PSObject.Properties["macAddress"]) { $existingMac = [string]$device.macAddress }
+        if ($device.PSObject.Properties["name"]) { $existingName = [string]$device.name }
+        if ($existingMac -and ((Format-MacAddress -Value $existingMac) -ieq $MacAddress)) { continue }
+        if ($existingName -and ($existingName -ieq $DeviceName)) { continue }
+        $devices.Add($device) | Out-Null
+    }
+
+    $newDevice = [pscustomobject]@{
+        name = $DeviceName
+        macAddress = $MacAddress
+    }
+    if (-not [string]::IsNullOrWhiteSpace($BroadcastIP)) {
+        Set-JsonObjectProperty -Object $newDevice -Name "broadcastIP" -Value $BroadcastIP.Trim()
+    }
+    $devices.Add($newDevice) | Out-Null
+
+    Set-JsonObjectProperty -Object $config -Name "wake_on_lan_devices" -Value ([object[]]@($devices))
+    Save-JetKvmConfigObject -JetKvmAddress $JetKvmAddress -KeyPath $KeyPath -Config $config -Log $Log
+}
+
 function Assert-JetKvmDomain {
     param([AllowEmptyString()][string]$Value)
     if ([string]::IsNullOrWhiteSpace($Value)) { throw "Custom domain is empty." }
@@ -2596,8 +2823,9 @@ function Start-JetFuelGuiV2 {
     $identityLayout.AutoSizeMode = [Windows.Forms.AutoSizeMode]::GrowAndShrink
     $identityLayout.BackColor = $ui.Window
     $identityLayout.ColumnCount = 1
-    $identityLayout.RowCount = 2
+    $identityLayout.RowCount = 3
     $identityLayout.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
+    $identityLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::AutoSize)) | Out-Null
     $identityLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::AutoSize)) | Out-Null
     $identityLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::AutoSize)) | Out-Null
     $identityPage.Controls.Add($identityLayout)
@@ -2674,6 +2902,9 @@ Identity tab
 - Apply USB writes the selected VID/PID/manufacturer/product to JetKVM's usb_config value.
 - EDID/USB apply creates a timestamped backup of /userdata/kvm_config.json, writes the new config over SSH, then offers to reboot the JetKVM so the KVM service reloads it.
 - USB identity changes the JetKVM composite USB gadget identity. It does not clone every descriptor from a separate physical keyboard or mouse.
+- Wake-on-LAN target scans this Windows PC for network adapters, calculates the MAC and broadcast IP, optionally enables Wake-on-LAN on the selected Windows adapter, then saves that target into JetKVM's Wake on LAN device list.
+- Enabling WOL on the Windows adapter requires Administrator PowerShell and adapter driver support. BIOS/UEFI Wake-on-LAN may still need to be enabled manually. Wired Ethernet is usually more reliable than Wi-Fi.
+- Saving the JetKVM WOL target backs up /userdata/kvm_config.json and offers to reboot JetKVM so the web UI reloads the Wake on LAN device list.
 
 Settings tab
 - Custom script URL is only used when Step 3 is set to Custom URL.
@@ -2690,6 +2921,7 @@ Settings tab
 Troubleshooting
 - If Git Bash is missing, JetFUEL can install Git for Windows only when winget is installed and working.
 - If winget reports that the application cannot be started, choose the App Installer repair option to open the Microsoft Store and install/reinstall App Installer, or choose the Git download option and install Git for Windows manually.
+- If Wake-on-LAN does not wake the Windows PC, confirm WOL is enabled in BIOS/UEFI, Windows adapter power management, and the NIC advanced driver settings. Prefer wired Ethernet; some Wi-Fi adapters and USB Ethernet adapters cannot wake a fully powered-off PC.
 - If the JetKVM stays in NeedsLogin, use Check Tailscale and look for a login URL in the log.
 - Tailscale auth keys should be full pre-authentication secrets beginning with tskey-auth-. The key ID ending CNTRL is not enough.
 - Tailscale installation may fail if the JetKVM itself is set up/authenticated using Google auth. Use local JetKVM authentication for this SSH/Developer Mode flow.
@@ -3120,6 +3352,75 @@ Status log
     $identityScanGrid.Controls.Add($scanThisPcButton, 2, 8)
     $identityLayout.Controls.Add($identityScanGroup, 0, 1)
 
+    $wolGroup = New-Group "Wake-on-LAN target"
+    & $makeGroupAutoHeight $wolGroup
+    $wolGrid = New-StepGrid 8
+    $wolGrid.ColumnStyles.Clear()
+    $wolGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, (S 145))) | Out-Null
+    $wolGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
+    $wolGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, (S 150))) | Out-Null
+    $wolGrid.RowStyles.Clear()
+    foreach ($height in @(38, 30, 30, 30, 30, 28, 40, 34)) {
+        $wolGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, (S $height))) | Out-Null
+    }
+    $wolGroup.Controls.Add($wolGrid)
+    $wolIntro = [Windows.Forms.Label]::new()
+    $wolIntro.Text = "Scan this Windows PC for the NIC MAC, optionally enable Windows Wake-on-LAN, then save it as a JetKVM Wake on LAN target."
+    $wolIntro.Dock = "Fill"
+    $wolIntro.ForeColor = $ui.Muted
+    $wolIntro.Font = [Drawing.Font]::new("Segoe UI", 9)
+    $wolAdapterBox = [Windows.Forms.ComboBox]::new()
+    $wolAdapterBox.Dock = "Fill"
+    $wolAdapterBox.DropDownStyle = [Windows.Forms.ComboBoxStyle]::DropDownList
+    $wolAdapterBox.Margin = New-ScaledPadding 0 2 8 2
+    $wolAdapterBox.BackColor = $ui.Input
+    $wolAdapterBox.ForeColor = $ui.InputText
+    $wolAdapterBox.Font = [Drawing.Font]::new("Segoe UI", 9)
+    $wolAdapterBox.DisplayMember = "DisplayName"
+    $wolNameBox = New-Field $env:COMPUTERNAME
+    $wolMacBox = New-Field ""
+    $wolBroadcastBox = New-Field ""
+    $enableLocalWolCheck = [Windows.Forms.CheckBox]::new()
+    $enableLocalWolCheck.Text = "Enable Wake-on-LAN on this Windows adapter first (requires Administrator)"
+    $enableLocalWolCheck.Checked = $true
+    $enableLocalWolCheck.Dock = "Fill"
+    Set-CheckStyle $enableLocalWolCheck
+    $wolStatusLabel = [Windows.Forms.Label]::new()
+    $wolStatusLabel.Text = "Scan adapters to pick the NIC that should wake this PC. Wired Ethernet is usually more reliable than Wi-Fi."
+    $wolStatusLabel.Dock = "Fill"
+    $wolStatusLabel.ForeColor = $ui.Muted
+    $wolStatusLabel.Font = [Drawing.Font]::new("Segoe UI", 9)
+    $scanWolAdaptersButton = [Windows.Forms.Button]::new()
+    $scanWolAdaptersButton.Text = "Scan NICs"
+    $scanWolAdaptersButton.Dock = "Fill"
+    $scanWolAdaptersButton.Margin = New-ScaledPadding 8 2 8 2
+    Set-ButtonStyle $scanWolAdaptersButton "Secondary"
+    $applyWolButton = [Windows.Forms.Button]::new()
+    $applyWolButton.Text = "Set up WOL"
+    $applyWolButton.Dock = "Fill"
+    $applyWolButton.Margin = New-ScaledPadding 8 2 8 2
+    Set-ButtonStyle $applyWolButton "Primary"
+    $wolGrid.Controls.Add($wolIntro, 0, 0)
+    $wolGrid.SetColumnSpan($wolIntro, 3)
+    $wolGrid.Controls.Add((New-RowLabel "Windows adapter"), 0, 1)
+    $wolGrid.Controls.Add($wolAdapterBox, 1, 1)
+    $wolGrid.Controls.Add($scanWolAdaptersButton, 2, 1)
+    $wolGrid.Controls.Add((New-RowLabel "Target name"), 0, 2)
+    $wolGrid.Controls.Add($wolNameBox, 1, 2)
+    $wolGrid.SetColumnSpan($wolNameBox, 2)
+    $wolGrid.Controls.Add((New-RowLabel "Target MAC"), 0, 3)
+    $wolGrid.Controls.Add($wolMacBox, 1, 3)
+    $wolGrid.SetColumnSpan($wolMacBox, 2)
+    $wolGrid.Controls.Add((New-RowLabel "Broadcast IP"), 0, 4)
+    $wolGrid.Controls.Add($wolBroadcastBox, 1, 4)
+    $wolGrid.SetColumnSpan($wolBroadcastBox, 2)
+    $wolGrid.Controls.Add($enableLocalWolCheck, 1, 5)
+    $wolGrid.SetColumnSpan($enableLocalWolCheck, 2)
+    $wolGrid.Controls.Add($wolStatusLabel, 0, 6)
+    $wolGrid.SetColumnSpan($wolStatusLabel, 2)
+    $wolGrid.Controls.Add($applyWolButton, 2, 6)
+    $identityLayout.Controls.Add($wolGroup, 0, 2)
+
     foreach ($preset in @(Get-JetKvmEdidPresets)) { [void]$displayChoiceBox.Items.Add($preset) }
     $displayChoiceBox.Enabled = ($displayChoiceBox.Items.Count -gt 0)
     $applyEdidButton.Enabled = $displayChoiceBox.Enabled
@@ -3394,6 +3695,8 @@ Status log
         $applyMacButton.Enabled = -not $Busy
         $clearMacButton.Enabled = -not $Busy
         $scanThisPcButton.Enabled = -not $Busy
+        $scanWolAdaptersButton.Enabled = -not $Busy
+        $applyWolButton.Enabled = -not $Busy
         $applyEdidButton.Enabled = (-not $Busy) -and $displayChoiceBox.Enabled -and ($null -ne $displayChoiceBox.SelectedItem)
         $applyUsbButton.Enabled = (-not $Busy) -and $usbChoiceBox.Enabled -and ($null -ne $usbChoiceBox.SelectedItem)
         $applyDeviceSettingsButton.Enabled = -not $Busy
@@ -3817,6 +4120,64 @@ echo '--- mac identity complete ---'
         }
     })
 
+    $refreshWolAdapters = {
+        $wolAdapterBox.Items.Clear()
+        $wolMacBox.Text = ""
+        $wolBroadcastBox.Text = ""
+        $wolStatusLabel.Text = "Scanning this Windows PC for physical network adapters..."
+        $wolStatusLabel.ForeColor = $ui.Info
+
+        $adapters = @(Get-LocalWakeOnLanAdapters)
+        foreach ($adapter in $adapters) {
+            [void]$wolAdapterBox.Items.Add($adapter)
+            $kind = if ($adapter.IsWireless) { "wireless" } else { "wired/unknown" }
+            & $log ("WOL adapter option: {0}; MAC {1}; IP {2}; broadcast {3}; {4}" -f $adapter.Name, $adapter.MacAddress, $(if ($adapter.IPAddress) { $adapter.IPAddress } else { "none" }), $(if ($adapter.BroadcastIP) { $adapter.BroadcastIP } else { "blank" }), $kind)
+        }
+
+        if ($wolAdapterBox.Items.Count -gt 0) {
+            $wolAdapterBox.DropDownWidth = [Math]::Max($wolAdapterBox.Width, (S 900))
+            $wolAdapterBox.SelectedIndex = 0
+            $wolStatusLabel.Text = "Choose the NIC that should wake this PC. Wired Ethernet is usually more reliable than Wi-Fi."
+            $wolStatusLabel.ForeColor = $ui.Good
+        } else {
+            $wolStatusLabel.Text = "No physical network adapters were found. You can still type a target MAC manually."
+            $wolStatusLabel.ForeColor = $ui.Warn
+        }
+    }
+
+    $wolAdapterBox.Add_SelectedIndexChanged({
+        if ($wolAdapterBox.SelectedItem) {
+            $adapter = $wolAdapterBox.SelectedItem
+            $wolMacBox.Text = [string]$adapter.MacAddress
+            $wolBroadcastBox.Text = [string]$adapter.BroadcastIP
+            if ([string]::IsNullOrWhiteSpace($wolNameBox.Text)) { $wolNameBox.Text = ConvertTo-WakeOnLanDeviceName -Value $env:COMPUTERNAME }
+            if ($adapter.IsWireless) {
+                $wolStatusLabel.Text = "Selected adapter looks wireless. Wake-on-LAN over Wi-Fi is often unsupported; wired Ethernet is safer."
+                $wolStatusLabel.ForeColor = $ui.Warn
+            } else {
+                $wolStatusLabel.Text = "Selected adapter MAC and broadcast IP are ready to save to JetKVM."
+                $wolStatusLabel.ForeColor = $ui.Good
+            }
+        }
+    })
+
+    $wolMacBox.Add_Leave({
+        $wolMacBox.Text = Format-MacAddress -Value $wolMacBox.Text
+    })
+
+    $scanWolAdaptersButton.Add_Click({
+        try {
+            & $setBusy $true "Scanning WOL adapters..."
+            & $log "--- Wake-on-LAN adapter scan ---"
+            & $refreshWolAdapters
+            & $setBusy $false "WOL scan complete"
+        } catch {
+            & $log ("ERROR: " + $_.Exception.Message)
+            & $setBusy $false "Failed"
+            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null
+        }
+    })
+
     $scanThisPcButton.Add_Click({
         try {
             & $setBusy $true "Scanning this PC identity..."
@@ -3906,6 +4267,81 @@ echo '--- mac identity complete ---'
             & $setBusy $false "$Reason saved"
         }
     }
+
+    $applyWolButton.Add_Click({
+        try {
+            $ip = $ipBox.Text.Trim()
+            $keyPath = $keyBox.Text.Trim()
+            Assert-ValidIpOrHost -Value $ip
+            if ([string]::IsNullOrWhiteSpace($keyPath)) { throw "Choose the SSH private key path before setting up Wake-on-LAN." }
+
+            $selectedAdapter = $wolAdapterBox.SelectedItem
+            $deviceName = ConvertTo-WakeOnLanDeviceName -Value $wolNameBox.Text
+            $wolNameBox.Text = $deviceName
+            $mac = Format-MacAddress -Value $wolMacBox.Text
+            $wolMacBox.Text = $mac
+            Assert-MacAddress -MacAddress $mac
+            $broadcast = $wolBroadcastBox.Text.Trim()
+            if (-not [string]::IsNullOrWhiteSpace($broadcast) -and -not (Test-IPv4Address -Value $broadcast)) {
+                throw "Broadcast IP must be a valid IPv4 address, or left blank."
+            }
+
+            if ($enableLocalWolCheck.Checked -and -not $selectedAdapter) {
+                throw "Scan and select a Windows adapter before enabling local Wake-on-LAN, or untick the local adapter option."
+            }
+
+            if ($selectedAdapter -and $selectedAdapter.IsWireless) {
+                $wifiAnswer = [Windows.Forms.MessageBox]::Show(
+                    "The selected adapter looks like Wi-Fi. Wake-on-LAN over Wi-Fi is often unsupported or unreliable.`r`n`r`nContinue anyway?",
+                    "Wireless Wake-on-LAN warning",
+                    "YesNo",
+                    "Warning"
+                )
+                if ($wifiAnswer -ne [Windows.Forms.DialogResult]::Yes) { return }
+            }
+
+            $localAction = if ($enableLocalWolCheck.Checked) { "JetFUEL will also try to enable Wake-on-LAN on the selected Windows adapter. This requires Administrator PowerShell and adapter driver support." } else { "JetFUEL will not change this Windows adapter. Make sure Wake-on-LAN is already enabled in Windows and BIOS/UEFI." }
+            $answer = [Windows.Forms.MessageBox]::Show(
+                "Set up this Wake-on-LAN target?`r`n`r`nName: $deviceName`r`nMAC: $mac`r`nBroadcast IP: $(if ($broadcast) { $broadcast } else { "(blank/default)" })`r`n`r`n$localAction`r`n`r`nJetFUEL will back up /userdata/kvm_config.json and save the target into JetKVM's Wake on LAN device list.",
+                "Set up Wake-on-LAN",
+                "YesNo",
+                "Warning"
+            )
+            if ($answer -ne [Windows.Forms.DialogResult]::Yes) {
+                & $log "Wake-on-LAN setup cancelled."
+                return
+            }
+
+            & $setBusy $true "Setting up WOL..."
+            if ($enableLocalWolCheck.Checked) {
+                try {
+                    Enable-LocalAdapterWakeOnLan -AdapterName $selectedAdapter.Name -AdapterDescription $selectedAdapter.InterfaceDescription -Log $log
+                } catch {
+                    $localMessage = Get-CleanExceptionMessage -ErrorRecord $_
+                    & $log "Warning: Local Wake-on-LAN enable failed: $localMessage"
+                    $continue = [Windows.Forms.MessageBox]::Show(
+                        "JetFUEL could not enable Wake-on-LAN on this Windows adapter:`r`n`r`n$localMessage`r`n`r`nSave the JetKVM Wake-on-LAN target anyway? You may need to enable WOL manually in Windows, adapter driver settings, and BIOS/UEFI.",
+                        "Local WOL setup failed",
+                        "YesNo",
+                        "Warning"
+                    )
+                    if ($continue -ne [Windows.Forms.DialogResult]::Yes) {
+                        & $setBusy $false "WOL cancelled"
+                        return
+                    }
+                }
+            }
+
+            Update-JetKvmWakeOnLanDevice -JetKvmAddress $ip -KeyPath $keyPath -DeviceName $deviceName -MacAddress $mac -BroadcastIP $broadcast -Log $log
+            & $log "Wake-on-LAN target saved to JetKVM: $deviceName ($mac)"
+            if ($broadcast) { & $log "Wake-on-LAN broadcast IP saved: $broadcast" }
+            & $rebootJetKvmAfterIdentity $ip $keyPath "Wake-on-LAN target"
+        } catch {
+            & $log ("ERROR: " + $_.Exception.Message)
+            & $setBusy $false "Failed"
+            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null
+        }
+    })
 
     $applyEdidButton.Add_Click({
         try {
