@@ -644,7 +644,7 @@ function Invoke-JetKvmTailscaleInstall {
     }
 
     $keyBashPath = ConvertTo-BashPath -BashPath $BashPath -WindowsPath $KeyPath -BashKind $BashKind
-    $sshOpts = "-i $keyBashPath -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+    $sshOpts = "-i $keyBashPath -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o IgnoreUnknown=WarnWeakCrypto -o WarnWeakCrypto=no-pq-kex"
     $sshProbeCommand = "ssh $sshOpts -o ConnectTimeout=5 root@$JetKvmAddress 'echo JETFUEL_SSH_OK'"
     & $Log "Checking SSH from $BashKind bash with the selected key..."
     $oldErrorActionPreference = $ErrorActionPreference
@@ -675,6 +675,8 @@ Host $JetKvmAddress
     IdentityFile $keyBashPath
     IdentitiesOnly yes
     StrictHostKeyChecking accept-new
+    IgnoreUnknown WarnWeakCrypto
+    WarnWeakCrypto no-pq-kex
 "@
     $sshConfigPath = Join-Path $sshDir "config"
     [IO.File]::WriteAllText($sshConfigPath, $sshConfig, [Text.UTF8Encoding]::new($false))
@@ -707,23 +709,31 @@ Host $JetKvmAddress
     & $Log "Starting JetKVM Tailscale install with $BashKind bash. The device will reboot during this step."
     $installerOutput = New-Object System.Collections.Generic.List[string]
     $loginUrlOpened = $false
-    & $BashPath -lc $bashCommand 2>&1 | ForEach-Object {
-        $line = [string]$_
-        $installerOutput.Add($line)
-        & $Log $line
-        if (-not $loginUrlOpened -and [string]::IsNullOrWhiteSpace($AuthKey)) {
-            $url = Get-TailscaleLoginUrlFromText -Text $line
-            if ($url) {
-                $loginUrlOpened = $true
-                if ($LoginUrlHandler) {
-                    & $LoginUrlHandler $url
-                } else {
-                    Start-Process $url
+    $installerExitCode = 1
+    $oldErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & $BashPath -lc $bashCommand 2>&1 | ForEach-Object {
+            $line = [string]$_
+            $installerOutput.Add($line) | Out-Null
+            & $Log $line
+            if (-not $loginUrlOpened -and [string]::IsNullOrWhiteSpace($AuthKey)) {
+                $url = Get-TailscaleLoginUrlFromText -Text $line
+                if ($url) {
+                    $loginUrlOpened = $true
+                    if ($LoginUrlHandler) {
+                        & $LoginUrlHandler $url
+                    } else {
+                        Start-Process $url
+                    }
                 }
             }
         }
+        $installerExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $oldErrorActionPreference
     }
-    if ($LASTEXITCODE -ne 0) {
+    if ($installerExitCode -ne 0) {
         $installerText = ($installerOutput -join "`n")
         if (-not $loginUrlOpened -and [string]::IsNullOrWhiteSpace($AuthKey)) {
             $url = Get-TailscaleLoginUrlFromText -Text $installerText
@@ -738,7 +748,7 @@ Host $JetKvmAddress
         if ($installerText -match 'invalid key|unable to validate API key|API key .*not valid|API key does not exist') {
             throw "Tailscale rejected the auth key. Create a new pre-authentication key in the Tailscale admin console, make sure it starts with tskey-auth-, check that it has not expired or already been used, then paste the full key and retry. You can also untick the auth key box and log in manually after install."
         }
-        throw "JetKVM Tailscale installer failed with exit code $LASTEXITCODE."
+        throw "JetKVM Tailscale installer failed with exit code $installerExitCode."
     }
 }
 
@@ -779,7 +789,7 @@ function Test-JetKvmSshLogin {
     $oldErrorActionPreference = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
     try {
-        $output = & $ssh -i $KeyPath -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new root@$JetKvmAddress "echo SSH_OK" 2>&1
+        $output = & $ssh -i $KeyPath -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new -o IgnoreUnknown=WarnWeakCrypto -o WarnWeakCrypto=no-pq-kex root@$JetKvmAddress "echo SSH_OK" 2>&1
         $exitCode = $LASTEXITCODE
     } finally {
         $ErrorActionPreference = $oldErrorActionPreference
@@ -815,6 +825,8 @@ function Invoke-JetKvmSshCommand {
         "-o", "ConnectTimeout=8",
         "-o", "StrictHostKeyChecking=accept-new",
         "-o", "IdentitiesOnly=yes",
+        "-o", "IgnoreUnknown=WarnWeakCrypto",
+        "-o", "WarnWeakCrypto=no-pq-kex",
         "root@$JetKvmAddress",
         $Command
     )
@@ -1331,6 +1343,8 @@ function Copy-TextToJetKvmFile {
         "-o", "ConnectTimeout=8",
         "-o", "StrictHostKeyChecking=accept-new",
         "-o", "IdentitiesOnly=yes",
+        "-o", "IgnoreUnknown=WarnWeakCrypto",
+        "-o", "WarnWeakCrypto=no-pq-kex",
         "root@$JetKvmAddress",
         "umask 077; cat > $(ConvertTo-ShellSingleQuoted $RemotePath)"
     )
@@ -3490,6 +3504,7 @@ Troubleshooting
 - If Wake-on-LAN does not wake the Windows PC, confirm WOL is enabled in BIOS/UEFI, Windows adapter power management, and the NIC advanced driver settings. Prefer wired Ethernet; some Wi-Fi adapters and USB Ethernet adapters cannot wake a fully powered-off PC.
 - If the JetKVM stays in NeedsLogin, use Check Tailscale and look for a login URL in the log.
 - Tailscale auth keys should be full pre-authentication secrets beginning with tskey-auth-. The key ID ending CNTRL is not enough.
+- Newer OpenSSH clients can print "connection is not using a post-quantum key exchange algorithm" when talking to JetKVM SSH. JetFUEL suppresses it where supported; it is an SSH warning and should not be treated as the Tailscale install failure.
 - Tailscale installation may fail if the JetKVM itself is set up/authenticated using Google auth. Use local JetKVM authentication for this SSH/Developer Mode flow.
 - If SSH login fails, confirm Developer Mode is enabled, the public key was saved in JetKVM Settings > Advanced, and the selected private key matches the public key.
 

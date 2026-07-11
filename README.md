@@ -197,6 +197,7 @@ Use the red `EXIT` button in the wizard header when you are finished.
 - If Tailscale goes offline after a reboot, use `Check Tailscale` to verify `/userdata/init.d/S22tailscale`, then use `Repair Tailscale` to recreate the boot hook and rerun `tailscale up`.
 - If `Repair Tailscale` says JetKVM must restart, allow the reboot. After the JetKVM comes back, run `Check Tailscale`; if it still shows `NeedsLogin`, run `Repair Tailscale` again with a reusable `tskey-auth-...` key or use the browser login URL.
 - Tailscale auth keys must be full pre-authentication secrets beginning with `tskey-auth-`. The key ID ending in `CNTRL` is not enough.
+- Newer OpenSSH clients can print `connection is not using a post-quantum key exchange algorithm` when talking to JetKVM SSH. JetFUEL suppresses it where supported; it is an SSH warning and should not be treated as the Tailscale install failure.
 - Tailscale installation may fail if the JetKVM itself is set up/authenticated using Google auth. Use local JetKVM authentication for this SSH/Developer Mode flow.
 - If SSH login fails, confirm Developer Mode is enabled, the public key was saved in JetKVM Settings > Advanced, and the selected private key matches the public key.
 - If Wake-on-LAN does not wake the Windows PC, confirm WOL is enabled in BIOS/UEFI, Windows adapter power management, and the NIC advanced driver settings. Prefer wired Ethernet. Some Wi-Fi adapters and USB Ethernet adapters cannot wake a fully powered-off PC.
