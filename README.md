@@ -194,7 +194,8 @@ Use the red `EXIT` button in the wizard header when you are finished.
 - If Git Bash is missing, JetFUEL can install Git for Windows only when `winget` is installed and working.
 - If `winget` says the application cannot be started, use the wizard's App Installer repair option to open the Microsoft Store and install/reinstall App Installer, or choose the Git download option and install Git for Windows manually.
 - If the JetKVM stays in `NeedsLogin`, use `Check Tailscale` and look for a login URL in the status log.
-- If Tailscale goes offline after a reboot, use `Check Tailscale` to verify `/userdata/init.d/S22tailscale`, then use `Repair Tailscale` to recreate the boot hook and rerun `tailscale up`.
+- If Tailscale goes offline after a reboot, use `Check Tailscale` to verify `/userdata/init.d/S22tailscale`, then use `Repair Tailscale` to recreate JetFUEL's robust boot hook and rerun `tailscale up`.
+- If Tailscale says `failed to connect to local tailscaled`, the daemon did not start or its socket was not ready. `Repair Tailscale` writes a boot hook that waits for networking and `/dev/net/tun` before starting `tailscaled`.
 - If `Repair Tailscale` says JetKVM must restart, allow the reboot. After the JetKVM comes back, run `Check Tailscale`; if it still shows `NeedsLogin`, run `Repair Tailscale` again with a reusable `tskey-auth-...` key or use the browser login URL.
 - Tailscale auth keys must be full pre-authentication secrets beginning with `tskey-auth-`. The key ID ending in `CNTRL` is not enough.
 - Newer OpenSSH clients can print `connection is not using a post-quantum key exchange algorithm` when talking to JetKVM SSH. JetFUEL suppresses it where supported; it is an SSH warning and should not be treated as the Tailscale install failure.

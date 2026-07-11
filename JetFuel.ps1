@@ -548,6 +548,141 @@ function Get-PublicKeyText {
     return (Get-Content -LiteralPath $pub -Raw).Trim()
 }
 
+function Get-JetKvmTailscaleInitScript {
+    return @'
+#!/bin/sh
+# /userdata/init.d/S22tailscale
+# JetFUEL robust Tailscale startup for JetKVM.
+
+LOG=/tmp/tailscale-init.log
+TS_DIR=/userdata/tailscale
+TS_DAEMON=$TS_DIR/tailscaled
+SOCK=/var/run/tailscale/tailscaled.sock
+
+log() {
+  echo "$(date): $*" >> "$LOG"
+}
+
+is_running() {
+  ps | grep '[t]ailscaled' >/dev/null 2>&1
+}
+
+wait_for_network() {
+  i=1
+  while [ "$i" -le 20 ]; do
+    ip route | grep default >/dev/null 2>&1 && return 0
+    log "waiting for default route ($i/20)"
+    sleep 1
+    i=$((i + 1))
+  done
+  log "default route was not ready after 20 seconds"
+  return 1
+}
+
+prepare_tun() {
+  mkdir -p /var/run/tailscale /dev/net
+  modprobe tun >> "$LOG" 2>&1 || true
+  if [ ! -c /dev/net/tun ]; then
+    mknod /dev/net/tun c 10 200 >> "$LOG" 2>&1 || true
+  fi
+}
+
+wait_for_socket() {
+  i=1
+  while [ "$i" -le 30 ]; do
+    [ -S "$SOCK" ] && return 0
+    if ! is_running; then
+      log "tailscaled exited while waiting for socket"
+      return 1
+    fi
+    sleep 1
+    i=$((i + 1))
+  done
+  log "tailscaled socket did not become ready after 30 seconds"
+  return 1
+}
+
+case "$1" in
+  start)
+    prepare_tun
+    wait_for_network || true
+    if is_running; then
+      log "tailscaled already running"
+      exit 0
+    fi
+    if [ ! -x "$TS_DAEMON" ]; then
+      log "missing or non-executable $TS_DAEMON"
+      exit 1
+    fi
+    log "starting tailscaled"
+    "$TS_DAEMON" >> "$LOG" 2>&1 &
+    wait_for_socket
+    ;;
+  stop)
+    killall tailscaled >> "$LOG" 2>&1 || true
+    ;;
+  restart)
+    killall tailscaled >> "$LOG" 2>&1 || true
+    sleep 1
+    "$0" start
+    ;;
+  *)
+    echo "Usage: $0 {start|stop|restart}"
+    exit 1
+    ;;
+esac
+'@
+}
+
+function Get-JetKvmTailscaleInitInstallBlock {
+    $script = Get-JetKvmTailscaleInitScript
+    return @"
+cat > /userdata/init.d/S22tailscale <<'JETFUEL_TAILSCALE_INIT'
+$script
+JETFUEL_TAILSCALE_INIT
+chmod +x /userdata/init.d/S22tailscale
+"@
+}
+
+function Get-JetKvmTailscaleRemoteStartBlock {
+    return @'
+echo "       Ensuring tailscaled is running..."
+if [ -x /userdata/init.d/S22tailscale ]; then
+  /userdata/init.d/S22tailscale start 2>&1 || true
+elif [ -x /userdata/tailscale/tailscaled ]; then
+  mkdir -p /var/run/tailscale /dev/net
+  modprobe tun 2>/dev/null || true
+  [ -c /dev/net/tun ] || mknod /dev/net/tun c 10 200 2>/dev/null || true
+  /userdata/tailscale/tailscaled >/tmp/tailscaled.log 2>&1 &
+else
+  echo "ERROR: /userdata/tailscale/tailscaled is missing or not executable"
+  exit 1
+fi
+
+i=1
+while [ "$i" -le 35 ]; do
+  if [ -S /var/run/tailscale/tailscaled.sock ]; then
+    echo "       tailscaled socket is ready"
+    exit 0
+  fi
+  if ! ps | grep '[t]ailscaled' >/dev/null 2>&1; then
+    echo "ERROR: tailscaled exited while starting"
+    cat /tmp/tailscale-init.log 2>/dev/null || true
+    cat /tmp/tailscaled.log 2>/dev/null || true
+    exit 1
+  fi
+  sleep 1
+  i=$((i + 1))
+done
+
+echo "ERROR: tailscaled did not become ready within 35 seconds"
+ps | grep tailscale | grep -v grep 2>&1 || true
+cat /tmp/tailscale-init.log 2>/dev/null || true
+cat /tmp/tailscaled.log 2>/dev/null || true
+exit 1
+'@
+}
+
 function Download-PatchedJetKvmTailscaleInstaller {
     param(
         [Parameter(Mandatory)][ValidateSet("Git", "WSL")][string]$BashKind,
@@ -602,6 +737,41 @@ function Download-PatchedJetKvmTailscaleInstaller {
         & $Log "Applied Git Bash compatibility patch to installer ping check."
     } else {
         & $Log "Using unmodified installer ping check for WSL bash."
+    }
+    $initInstallBlock = Get-JetKvmTailscaleInitInstallBlock
+    $configureNeedle = "  ./tailscale configure jetkvm 2>&1 >/dev/null"
+    if ($content.Contains($configureNeedle) -and $content -notmatch "JetFUEL robust Tailscale startup") {
+        $content = $content.Replace(
+            $configureNeedle,
+            "$configureNeedle`n`n  echo `"       Installing robust JetFUEL Tailscale boot hook...`"`n$initInstallBlock"
+        )
+        & $Log "Applied robust JetKVM Tailscale boot-hook patch."
+    } elseif ($content -match "JetFUEL robust Tailscale startup") {
+        & $Log "Installer already contains the JetFUEL robust boot-hook patch."
+    } else {
+        & $Log "Warning: could not locate tailscale configure step to patch boot hook. Install may still need Repair Tailscale afterwards."
+    }
+
+    $startNeedle = @'
+	echo "[7/7] Starting Tailscale service..."
+	ssh root@"$JETKVM_IP" "tailscale up $TAILSCALE_UP_ARGS"
+'@
+    if ($content.Contains($startNeedle)) {
+        $remoteStartBlock = (Get-JetKvmTailscaleRemoteStartBlock) -split "`r?`n"
+        $indentedRemoteStartBlock = (($remoteStartBlock | ForEach-Object { $_ }) -join "`n")
+        $startReplacement = @"
+	echo "[7/7] Starting Tailscale service..."
+	ssh root@"`$JETKVM_IP" 'sh -s' <<'JETFUEL_START_TAILSCALE'
+$indentedRemoteStartBlock
+JETFUEL_START_TAILSCALE
+	ssh root@"`$JETKVM_IP" "tailscale up `$TAILSCALE_UP_ARGS"
+"@
+        $content = $content.Replace($startNeedle, $startReplacement)
+        & $Log "Applied tailscaled start/readiness patch to installer."
+    } elseif ($content -match "JETFUEL_START_TAILSCALE") {
+        & $Log "Installer already contains the JetFUEL tailscaled start/readiness patch."
+    } else {
+        & $Log "Warning: could not locate installer start step to patch tailscaled readiness."
     }
     $content = $content.Replace('SSH_TEST_OUTPUT=$(ssh ', 'SSH_TEST_OUTPUT=$(ssh $JETFUEL_SSH_OPTS ')
     $content = $content.Replace("`tssh root@", "`tssh `$JETFUEL_SSH_OPTS root@")
@@ -1382,6 +1552,45 @@ function Copy-TextToJetKvmFile {
     } finally {
         if ($process) { $process.Dispose() }
     }
+}
+
+function Set-JetKvmTailscaleInitHook {
+    param(
+        [Parameter(Mandatory)][string]$JetKvmAddress,
+        [Parameter(Mandatory)][string]$KeyPath,
+        [scriptblock]$Log
+    )
+
+    if ($Log) { & $Log "Writing robust JetFUEL Tailscale boot hook to /userdata/init.d/S22tailscale..." }
+    $write = Copy-TextToJetKvmFile -JetKvmAddress $JetKvmAddress -KeyPath $KeyPath -Content (Get-JetKvmTailscaleInitScript) -RemotePath "/userdata/init.d/S22tailscale" -TimeoutSeconds 30
+    if ($write.ExitCode -ne 0) {
+        throw "Failed to write robust Tailscale boot hook: $($write.Output)"
+    }
+
+    $chmod = Invoke-JetKvmSshCommand -JetKvmAddress $JetKvmAddress -KeyPath $KeyPath -Command "chmod +x /userdata/init.d/S22tailscale 2>&1 && echo '[OK] robust boot hook installed'" -TimeoutSeconds 20
+    if ($chmod.Output -and $Log) { $chmod.Output -split "`n" | ForEach-Object { & $Log $_ } }
+    if ($chmod.ExitCode -ne 0) {
+        throw "Failed to make Tailscale boot hook executable: $($chmod.Output)"
+    }
+}
+
+function Invoke-JetKvmTailscaleStartGuard {
+    param(
+        [Parameter(Mandatory)][string]$JetKvmAddress,
+        [Parameter(Mandatory)][string]$KeyPath,
+        [scriptblock]$Log,
+        [int]$TimeoutSeconds = 50
+    )
+
+    $remotePath = "/tmp/jetfuel-start-tailscale.sh"
+    $write = Copy-TextToJetKvmFile -JetKvmAddress $JetKvmAddress -KeyPath $KeyPath -Content (Get-JetKvmTailscaleRemoteStartBlock) -RemotePath $remotePath -TimeoutSeconds 30
+    if ($write.ExitCode -ne 0) {
+        throw "Failed to write tailscaled start guard: $($write.Output)"
+    }
+
+    $result = Invoke-JetKvmSshCommand -JetKvmAddress $JetKvmAddress -KeyPath $KeyPath -Command "chmod +x $remotePath && sh $remotePath 2>&1" -TimeoutSeconds $TimeoutSeconds
+    if ($result.Output -and $Log) { $result.Output -split "`n" | ForEach-Object { & $Log $_ } }
+    return $result
 }
 
 function Save-JetKvmConfigObject {
@@ -3450,7 +3659,7 @@ Exit / cleanup
 Tailscale tab
 - Check Tailscale prints status, Tailscale IP, version, routes, DNS, and running Tailscale processes.
 - Check Tailscale also verifies the JetKVM boot hook at /userdata/init.d/S22tailscale so you can see whether Tailscale should survive reboot.
-- Repair Tailscale recreates the JetKVM Tailscale boot hook, starts tailscaled if needed, then reruns tailscale up with the current auth key/hostname settings or opens the manual login URL when no auth key is used.
+- Repair Tailscale recreates JetFUEL's robust boot hook, waits for tailscaled to create its socket, then reruns tailscale up with the current auth key/hostname settings or opens the manual login URL when no auth key is used.
 - Remove Tailscale logs out where possible, stops Tailscale, removes /userdata/tailscale, and reboots the JetKVM.
 
 Identity tab
@@ -3503,6 +3712,7 @@ Troubleshooting
 - If winget reports that the application cannot be started, choose the App Installer repair option to open the Microsoft Store and install/reinstall App Installer, or choose the Git download option and install Git for Windows manually.
 - If Wake-on-LAN does not wake the Windows PC, confirm WOL is enabled in BIOS/UEFI, Windows adapter power management, and the NIC advanced driver settings. Prefer wired Ethernet; some Wi-Fi adapters and USB Ethernet adapters cannot wake a fully powered-off PC.
 - If the JetKVM stays in NeedsLogin, use Check Tailscale and look for a login URL in the log.
+- If Tailscale says "failed to connect to local tailscaled", the daemon did not start or its socket was not ready. Run Repair Tailscale; JetFUEL writes a boot hook that waits for networking and /dev/net/tun before starting tailscaled.
 - Tailscale auth keys should be full pre-authentication secrets beginning with tskey-auth-. The key ID ending CNTRL is not enough.
 - Newer OpenSSH clients can print "connection is not using a post-quantum key exchange algorithm" when talking to JetKVM SSH. JetFUEL suppresses it where supported; it is an SSH warning and should not be treated as the Tailscale install failure.
 - Tailscale installation may fail if the JetKVM itself is set up/authenticated using Google auth. Use local JetKVM authentication for this SSH/Developer Mode flow.
@@ -3782,7 +3992,7 @@ Status log
     $tailscaleHelp.Dock = "Fill"
     $tailscaleHelp.ForeColor = $ui.Muted
     $tailscaleHelp.Font = [Drawing.Font]::new("Segoe UI", 9)
-    $tailscaleHelp.Text = "Check Tailscale prints status, routes, DNS, version, and running processes from the JetKVM.`r`nRepair Tailscale recreates the boot hook if needed, may reboot JetKVM when the hook has just been repaired, then runs tailscale up using the current auth-key/hostname fields or opens a browser login URL when no auth key is used.`r`nRemove Tailscale logs out where possible, stops Tailscale, removes /userdata/tailscale, and reboots the JetKVM."
+    $tailscaleHelp.Text = "Check Tailscale prints status, routes, DNS, version, and running processes from the JetKVM.`r`nRepair Tailscale recreates JetFUEL's robust boot hook, waits for the tailscaled socket, then runs tailscale up using the current auth-key/hostname fields or opens a browser login URL when no auth key is used.`r`nRemove Tailscale logs out where possible, stops Tailscale, removes /userdata/tailscale, and reboots the JetKVM."
     $tailscaleHelpGroup.Controls.Add($tailscaleHelp)
     $tailscaleLayout.Controls.Add($tailscaleHelpGroup, 0, 1)
 
@@ -5403,7 +5613,7 @@ echo '--- mac identity complete ---'
             $ip = $ipBox.Text.Trim()
             $keyPath = $keyBox.Text.Trim()
             Assert-ValidIpOrHost -Value $ip
-            $cmd = "echo '--- date ---'; date 2>&1 || true; echo '--- network ---'; ip route 2>&1 || true; cat /etc/resolv.conf 2>&1 || true; echo '--- tailscale persistence/autostart ---'; if [ -x /userdata/tailscale/tailscale ]; then echo '[OK] /userdata/tailscale/tailscale exists'; else echo '[FAIL] /userdata/tailscale/tailscale missing or not executable'; fi; if [ -x /userdata/tailscale/tailscaled ]; then echo '[OK] /userdata/tailscale/tailscaled exists'; else echo '[FAIL] /userdata/tailscale/tailscaled missing or not executable'; fi; if [ -f /userdata/init.d/S22tailscale ]; then echo '[OK] /userdata/init.d/S22tailscale exists'; grep -n 'tailscaled\|/dev/net/tun\|killall tailscaled' /userdata/init.d/S22tailscale 2>&1 || true; else echo '[FAIL] /userdata/init.d/S22tailscale missing - Tailscale may not start after reboot'; fi; if [ -f /userdata/init.d/S22tailscale ] && grep -q '/userdata/tailscale/tailscaled' /userdata/init.d/S22tailscale; then echo '[OK] boot hook starts tailscaled'; else echo '[FAIL] boot hook does not start /userdata/tailscale/tailscaled'; fi; echo '--- tailscale status ---'; tailscale status 2>&1 || true; echo '--- tailscale ip ---'; tailscale ip -4 2>&1 || true; echo '--- tailscale version ---'; tailscale version 2>&1 || true; echo '--- processes ---'; ps | grep tailscale | grep -v grep 2>&1 || echo '[WARN] no tailscale processes found'; echo '--- check complete ---'"
+            $cmd = "echo '--- date ---'; date 2>&1 || true; echo '--- network ---'; ip route 2>&1 || true; cat /etc/resolv.conf 2>&1 || true; echo '--- tailscale persistence/autostart ---'; if [ -x /userdata/tailscale/tailscale ]; then echo '[OK] /userdata/tailscale/tailscale exists'; else echo '[FAIL] /userdata/tailscale/tailscale missing or not executable'; fi; if [ -x /userdata/tailscale/tailscaled ]; then echo '[OK] /userdata/tailscale/tailscaled exists'; else echo '[FAIL] /userdata/tailscale/tailscaled missing or not executable'; fi; if [ -f /userdata/init.d/S22tailscale ]; then echo '[OK] /userdata/init.d/S22tailscale exists'; grep -n 'tailscaled\|/dev/net/tun\|killall tailscaled' /userdata/init.d/S22tailscale 2>&1 || true; else echo '[FAIL] /userdata/init.d/S22tailscale missing - Tailscale may not start after reboot'; fi; if [ -f /userdata/init.d/S22tailscale ] && ( grep -q 'JetFUEL robust Tailscale startup' /userdata/init.d/S22tailscale || grep -q '/userdata/tailscale/tailscaled' /userdata/init.d/S22tailscale ); then echo '[OK] boot hook starts tailscaled'; else echo '[FAIL] boot hook does not start tailscaled'; fi; echo '--- tailscale status ---'; tailscale status 2>&1 || true; echo '--- tailscale ip ---'; tailscale ip -4 2>&1 || true; echo '--- tailscale version ---'; tailscale version 2>&1 || true; echo '--- processes ---'; ps | grep tailscale | grep -v grep 2>&1 || echo '[WARN] no tailscale processes found'; echo '--- check complete ---'"
             $result = Invoke-JetKvmSshCommand -JetKvmAddress $ip -KeyPath $keyPath -Command $cmd -TimeoutSeconds 45
             if ($result.Output) { $result.Output -split "`n" | ForEach-Object { & $log $_ } }
             if ($result.ExitCode -eq 0) { & $setBusy $false "Tailscale check complete" }
@@ -5428,29 +5638,17 @@ echo '--- mac identity complete ---'
             $authKey = $authBox.Text.Trim()
             Assert-ValidIpOrHost -Value $ip
 
-            $ensurePersistentCmd = "echo '--- ensure tailscale persistence/autostart ---'; if [ -x /userdata/tailscale/tailscale ]; then /userdata/tailscale/tailscale configure jetkvm 2>&1 || true; else echo 'WARN: /userdata/tailscale/tailscale is missing'; fi; if [ -f /userdata/init.d/S22tailscale ]; then chmod +x /userdata/init.d/S22tailscale 2>&1 || true; fi; if ! ps | grep '[t]ailscaled' >/dev/null 2>&1; then echo 'tailscaled is not running; starting it'; if [ -x /userdata/init.d/S22tailscale ]; then /userdata/init.d/S22tailscale start 2>&1 || true; elif [ -x /userdata/tailscale/tailscaled ]; then /userdata/tailscale/tailscaled >/dev/null 2>&1 & else echo 'WARN: cannot start tailscaled because binary is missing'; fi; sleep 2; fi; echo '--- persistence check ---'; if [ -f /userdata/init.d/S22tailscale ] && grep -q '/userdata/tailscale/tailscaled' /userdata/init.d/S22tailscale; then echo '[OK] boot hook exists'; else echo '[FAIL] boot hook missing or incomplete'; fi; ps | grep tailscale | grep -v grep 2>&1 || true"
-            $persistentResult = Invoke-JetKvmSshCommand -JetKvmAddress $ip -KeyPath $keyPath -Command $ensurePersistentCmd -TimeoutSeconds 45
-            if ($persistentResult.Output) { $persistentResult.Output -split "`n" | ForEach-Object { & $log $_ } }
-            if ($persistentResult.Output -match 'Now restart your JetKVM|restart your JetKVM') {
-                $answer = [Windows.Forms.MessageBox]::Show(
-                    "The JetKVM Tailscale boot hook was repaired, but JetKVM says it must reboot before tailscaled will start.`r`n`r`nReboot the JetKVM now? After it comes back online, click Check Tailscale. If it still shows NeedsLogin, click Repair Tailscale again.",
-                    "JetKVM reboot required",
-                    "YesNo",
-                    "Warning"
-                )
-                if ($answer -eq [Windows.Forms.DialogResult]::Yes) {
-                    & $log "Rebooting JetKVM so the Tailscale boot hook can start tailscaled..."
-                    try {
-                        $null = Invoke-JetKvmSshCommand -JetKvmAddress $ip -KeyPath $keyPath -Command "( sleep 1; reboot ) >/dev/null 2>&1 &" -TimeoutSeconds 5
-                    } catch {
-                        & $log "Reboot command sent; SSH may disconnect while JetKVM restarts."
-                    }
-                    & $setBusy $false "JetKVM rebooting"
-                } else {
-                    & $log "Repair paused. Reboot the JetKVM, then click Check Tailscale."
-                    & $setBusy $false "Reboot required"
-                }
-                return
+            $configureCmd = "echo '--- configure tailscale persistence/autostart ---'; if [ -x /userdata/tailscale/tailscale ]; then /userdata/tailscale/tailscale configure jetkvm 2>&1 || true; else echo 'WARN: /userdata/tailscale/tailscale is missing'; exit 1; fi"
+            $configureResult = Invoke-JetKvmSshCommand -JetKvmAddress $ip -KeyPath $keyPath -Command $configureCmd -TimeoutSeconds 35
+            if ($configureResult.Output) { $configureResult.Output -split "`n" | ForEach-Object { & $log $_ } }
+            if ($configureResult.ExitCode -ne 0) {
+                throw "Cannot repair Tailscale because /userdata/tailscale/tailscale is missing. Run Step 5 install first."
+            }
+
+            Set-JetKvmTailscaleInitHook -JetKvmAddress $ip -KeyPath $keyPath -Log $log
+            $startResult = Invoke-JetKvmTailscaleStartGuard -JetKvmAddress $ip -KeyPath $keyPath -Log $log -TimeoutSeconds 60
+            if ($startResult.ExitCode -ne 0) {
+                throw "tailscaled did not start. Check the status log and /tmp/tailscale-init.log on the JetKVM for details."
             }
 
             $preStatus = Invoke-JetKvmSshCommand -JetKvmAddress $ip -KeyPath $keyPath -Command "tailscale status 2>&1" -TimeoutSeconds 30
@@ -5505,7 +5703,7 @@ echo '--- mac identity complete ---'
                 }
                 throw "Tailscale needs login, but no login URL was detected. Paste an auth key or run tailscale up manually over SSH."
             }
-            $cmd = "echo '--- status before repair ---'; tailscale status 2>&1; echo '--- ensure tailscale persistence/autostart ---'; if [ -x /userdata/tailscale/tailscale ]; then /userdata/tailscale/tailscale configure jetkvm 2>&1 || true; fi; if [ -f /userdata/init.d/S22tailscale ]; then chmod +x /userdata/init.d/S22tailscale 2>&1 || true; fi; if ! ps | grep '[t]ailscaled' >/dev/null 2>&1; then if [ -x /userdata/init.d/S22tailscale ]; then /userdata/init.d/S22tailscale start 2>&1 || true; elif [ -x /userdata/tailscale/tailscaled ]; then /userdata/tailscale/tailscaled >/dev/null 2>&1 & fi; sleep 2; fi; echo '--- logout/reset local login state ---'; tailscale logout 2>&1 || true; echo '--- running tailscale up repair ---'; tailscale up $upArgText 2>&1; echo '--- status after repair ---'; tailscale status 2>&1; echo '--- ip after repair ---'; tailscale ip -4 2>&1; echo '--- persistence after repair ---'; if [ -f /userdata/init.d/S22tailscale ] && grep -q '/userdata/tailscale/tailscaled' /userdata/init.d/S22tailscale; then echo '[OK] boot hook exists'; else echo '[FAIL] boot hook missing or incomplete'; fi"
+            $cmd = "echo '--- status before repair ---'; tailscale status 2>&1 || true; echo '--- logout/reset local login state ---'; tailscale logout 2>&1 || true; echo '--- running tailscale up repair ---'; tailscale up $upArgText 2>&1; echo '--- status after repair ---'; tailscale status 2>&1; echo '--- ip after repair ---'; tailscale ip -4 2>&1; echo '--- persistence after repair ---'; if [ -f /userdata/init.d/S22tailscale ] && grep -q 'JetFUEL robust Tailscale startup' /userdata/init.d/S22tailscale; then echo '[OK] robust boot hook exists'; else echo '[FAIL] robust boot hook missing or incomplete'; fi"
             $result = Invoke-JetKvmSshCommand -JetKvmAddress $ip -KeyPath $keyPath -Command $cmd -TimeoutSeconds 90
             $safeOutput = $result.Output
             if (-not [string]::IsNullOrWhiteSpace($authKey)) {
