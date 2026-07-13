@@ -558,6 +558,7 @@ LOG=/tmp/tailscale-init.log
 TS_DIR=/userdata/tailscale
 TS_DAEMON=$TS_DIR/tailscaled
 SOCK=/var/run/tailscale/tailscaled.sock
+WATCHDOG_PID=/var/run/tailscale/jetfuel-watchdog.pid
 
 log() {
   echo "$(date): $*" >> "$LOG"
@@ -587,6 +588,21 @@ prepare_tun() {
   fi
 }
 
+start_daemon() {
+  prepare_tun
+  wait_for_network || true
+  if is_running; then
+    log "tailscaled already running"
+    return 0
+  fi
+  if [ ! -x "$TS_DAEMON" ]; then
+    log "missing or non-executable $TS_DAEMON"
+    return 1
+  fi
+  log "starting tailscaled"
+  "$TS_DAEMON" >> "$LOG" 2>&1 &
+}
+
 wait_for_socket() {
   i=1
   while [ "$i" -le 30 ]; do
@@ -602,26 +618,65 @@ wait_for_socket() {
   return 1
 }
 
+watchdog_running() {
+  if [ -f "$WATCHDOG_PID" ]; then
+    pid="$(cat "$WATCHDOG_PID" 2>/dev/null || true)"
+    if [ -n "$pid" ] && ps | grep -q "^[[:space:]]*$pid[[:space:]]"; then
+      return 0
+    fi
+  fi
+  return 1
+}
+
+start_watchdog() {
+  if watchdog_running; then
+    log "watchdog already running"
+    return 0
+  fi
+  (
+    log "watchdog started"
+    while true; do
+      sleep 60
+      if ! is_running; then
+        log "watchdog: tailscaled is not running; restarting"
+        start_daemon || true
+        wait_for_socket || true
+        continue
+      fi
+      if [ ! -S "$SOCK" ]; then
+        log "watchdog: tailscaled socket missing; restarting daemon"
+        killall tailscaled >> "$LOG" 2>&1 || true
+        sleep 2
+        start_daemon || true
+        wait_for_socket || true
+      fi
+    done
+  ) &
+  echo $! > "$WATCHDOG_PID"
+}
+
+stop_watchdog() {
+  if [ -f "$WATCHDOG_PID" ]; then
+    pid="$(cat "$WATCHDOG_PID" 2>/dev/null || true)"
+    if [ -n "$pid" ]; then
+      kill "$pid" >> "$LOG" 2>&1 || true
+    fi
+    rm -f "$WATCHDOG_PID"
+  fi
+}
+
 case "$1" in
   start)
-    prepare_tun
-    wait_for_network || true
-    if is_running; then
-      log "tailscaled already running"
-      exit 0
-    fi
-    if [ ! -x "$TS_DAEMON" ]; then
-      log "missing or non-executable $TS_DAEMON"
-      exit 1
-    fi
-    log "starting tailscaled"
-    "$TS_DAEMON" >> "$LOG" 2>&1 &
+    start_daemon || exit 1
+    start_watchdog
     wait_for_socket
     ;;
   stop)
+    stop_watchdog
     killall tailscaled >> "$LOG" 2>&1 || true
     ;;
   restart)
+    stop_watchdog
     killall tailscaled >> "$LOG" 2>&1 || true
     sleep 1
     "$0" start
@@ -3659,7 +3714,7 @@ Exit / cleanup
 Tailscale tab
 - Check Tailscale prints status, Tailscale IP, version, routes, DNS, and running Tailscale processes.
 - Check Tailscale also verifies the JetKVM boot hook at /userdata/init.d/S22tailscale so you can see whether Tailscale should survive reboot.
-- Repair Tailscale recreates JetFUEL's robust boot hook, waits for tailscaled to create its socket, then reruns tailscale up with the current auth key/hostname settings or opens the manual login URL when no auth key is used.
+- Repair Tailscale recreates JetFUEL's robust boot hook and watchdog, waits for tailscaled to create its socket, then reruns tailscale up with the current auth key/hostname settings or opens the manual login URL when no auth key is used.
 - Remove Tailscale logs out where possible, stops Tailscale, removes /userdata/tailscale, and reboots the JetKVM.
 
 Identity tab
@@ -3712,7 +3767,7 @@ Troubleshooting
 - If winget reports that the application cannot be started, choose the App Installer repair option to open the Microsoft Store and install/reinstall App Installer, or choose the Git download option and install Git for Windows manually.
 - If Wake-on-LAN does not wake the Windows PC, confirm WOL is enabled in BIOS/UEFI, Windows adapter power management, and the NIC advanced driver settings. Prefer wired Ethernet; some Wi-Fi adapters and USB Ethernet adapters cannot wake a fully powered-off PC.
 - If the JetKVM stays in NeedsLogin, use Check Tailscale and look for a login URL in the log.
-- If Tailscale says "failed to connect to local tailscaled", the daemon did not start or its socket was not ready. Run Repair Tailscale; JetFUEL writes a boot hook that waits for networking and /dev/net/tun before starting tailscaled.
+- If Tailscale says "failed to connect to local tailscaled", the daemon did not start or its socket was not ready. Run Repair Tailscale; JetFUEL writes a boot hook that waits for networking and /dev/net/tun before starting tailscaled, then keeps a small watchdog running to restart it if it later exits.
 - Tailscale auth keys should be full pre-authentication secrets beginning with tskey-auth-. The key ID ending CNTRL is not enough.
 - Newer OpenSSH clients can print "connection is not using a post-quantum key exchange algorithm" when talking to JetKVM SSH. JetFUEL suppresses it where supported; it is an SSH warning and should not be treated as the Tailscale install failure.
 - Tailscale installation may fail if the JetKVM itself is set up/authenticated using Google auth. Use local JetKVM authentication for this SSH/Developer Mode flow.
@@ -3992,7 +4047,7 @@ Status log
     $tailscaleHelp.Dock = "Fill"
     $tailscaleHelp.ForeColor = $ui.Muted
     $tailscaleHelp.Font = [Drawing.Font]::new("Segoe UI", 9)
-    $tailscaleHelp.Text = "Check Tailscale prints status, routes, DNS, version, and running processes from the JetKVM.`r`nRepair Tailscale recreates JetFUEL's robust boot hook, waits for the tailscaled socket, then runs tailscale up using the current auth-key/hostname fields or opens a browser login URL when no auth key is used.`r`nRemove Tailscale logs out where possible, stops Tailscale, removes /userdata/tailscale, and reboots the JetKVM."
+    $tailscaleHelp.Text = "Check Tailscale prints status, routes, DNS, version, running processes, and whether the JetFUEL watchdog is installed/running.`r`nRepair Tailscale recreates JetFUEL's robust boot hook and watchdog, waits for the tailscaled socket, then runs tailscale up using the current auth-key/hostname fields or opens a browser login URL when no auth key is used.`r`nRemove Tailscale logs out where possible, stops Tailscale, removes /userdata/tailscale, and reboots the JetKVM."
     $tailscaleHelpGroup.Controls.Add($tailscaleHelp)
     $tailscaleLayout.Controls.Add($tailscaleHelpGroup, 0, 1)
 
@@ -5613,7 +5668,39 @@ echo '--- mac identity complete ---'
             $ip = $ipBox.Text.Trim()
             $keyPath = $keyBox.Text.Trim()
             Assert-ValidIpOrHost -Value $ip
-            $cmd = "echo '--- date ---'; date 2>&1 || true; echo '--- network ---'; ip route 2>&1 || true; cat /etc/resolv.conf 2>&1 || true; echo '--- tailscale persistence/autostart ---'; if [ -x /userdata/tailscale/tailscale ]; then echo '[OK] /userdata/tailscale/tailscale exists'; else echo '[FAIL] /userdata/tailscale/tailscale missing or not executable'; fi; if [ -x /userdata/tailscale/tailscaled ]; then echo '[OK] /userdata/tailscale/tailscaled exists'; else echo '[FAIL] /userdata/tailscale/tailscaled missing or not executable'; fi; if [ -f /userdata/init.d/S22tailscale ]; then echo '[OK] /userdata/init.d/S22tailscale exists'; grep -n 'tailscaled\|/dev/net/tun\|killall tailscaled' /userdata/init.d/S22tailscale 2>&1 || true; else echo '[FAIL] /userdata/init.d/S22tailscale missing - Tailscale may not start after reboot'; fi; if [ -f /userdata/init.d/S22tailscale ] && ( grep -q 'JetFUEL robust Tailscale startup' /userdata/init.d/S22tailscale || grep -q '/userdata/tailscale/tailscaled' /userdata/init.d/S22tailscale ); then echo '[OK] boot hook starts tailscaled'; else echo '[FAIL] boot hook does not start tailscaled'; fi; echo '--- tailscale status ---'; tailscale status 2>&1 || true; echo '--- tailscale ip ---'; tailscale ip -4 2>&1 || true; echo '--- tailscale version ---'; tailscale version 2>&1 || true; echo '--- processes ---'; ps | grep tailscale | grep -v grep 2>&1 || echo '[WARN] no tailscale processes found'; echo '--- check complete ---'"
+            $cmd = @'
+echo '--- date ---'
+date 2>&1 || true
+echo '--- network ---'
+ip route 2>&1 || true
+cat /etc/resolv.conf 2>&1 || true
+echo '--- tailscale persistence/autostart ---'
+if [ -x /userdata/tailscale/tailscale ]; then echo '[OK] /userdata/tailscale/tailscale exists'; else echo '[FAIL] /userdata/tailscale/tailscale missing or not executable'; fi
+if [ -x /userdata/tailscale/tailscaled ]; then echo '[OK] /userdata/tailscale/tailscaled exists'; else echo '[FAIL] /userdata/tailscale/tailscaled missing or not executable'; fi
+if [ -f /userdata/init.d/S22tailscale ]; then
+  echo '[OK] /userdata/init.d/S22tailscale exists'
+  grep -n 'watchdog\|tailscaled\|/dev/net/tun\|killall tailscaled' /userdata/init.d/S22tailscale 2>&1 || true
+else
+  echo '[FAIL] /userdata/init.d/S22tailscale missing - Tailscale may not start after reboot'
+fi
+if [ -f /userdata/init.d/S22tailscale ] && ( grep -q 'JetFUEL robust Tailscale startup' /userdata/init.d/S22tailscale || grep -q '/userdata/tailscale/tailscaled' /userdata/init.d/S22tailscale ); then echo '[OK] boot hook starts tailscaled'; else echo '[FAIL] boot hook does not start tailscaled'; fi
+if [ -f /userdata/init.d/S22tailscale ] && grep -q 'watchdog' /userdata/init.d/S22tailscale; then echo '[OK] watchdog configured in boot hook'; else echo '[WARN] watchdog not configured in boot hook'; fi
+if [ -f /var/run/tailscale/jetfuel-watchdog.pid ]; then
+  pid="$(cat /var/run/tailscale/jetfuel-watchdog.pid 2>/dev/null || true)"
+  if [ -n "$pid" ] && ps | grep -q "^[[:space:]]*$pid[[:space:]]"; then echo '[OK] watchdog process running'; else echo '[WARN] watchdog pid file exists but process not found'; fi
+else
+  echo '[WARN] watchdog pid file missing'
+fi
+echo '--- tailscale status ---'
+tailscale status 2>&1 || true
+echo '--- tailscale ip ---'
+tailscale ip -4 2>&1 || true
+echo '--- tailscale version ---'
+tailscale version 2>&1 || true
+echo '--- processes ---'
+ps | grep tailscale | grep -v grep 2>&1 || echo '[WARN] no tailscale processes found'
+echo '--- check complete ---'
+'@
             $result = Invoke-JetKvmSshCommand -JetKvmAddress $ip -KeyPath $keyPath -Command $cmd -TimeoutSeconds 45
             if ($result.Output) { $result.Output -split "`n" | ForEach-Object { & $log $_ } }
             if ($result.ExitCode -eq 0) { & $setBusy $false "Tailscale check complete" }
