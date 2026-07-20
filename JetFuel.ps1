@@ -557,6 +557,7 @@ function Get-JetKvmTailscaleInitScript {
 LOG=/tmp/tailscale-init.log
 TS_DIR=/userdata/tailscale
 TS_DAEMON=$TS_DIR/tailscaled
+TS_CLI=$TS_DIR/tailscale
 SOCK=/var/run/tailscale/tailscaled.sock
 WATCHDOG_PID=/var/run/tailscale/jetfuel-watchdog.pid
 
@@ -628,6 +629,18 @@ watchdog_running() {
   return 1
 }
 
+daemon_responding() {
+  [ -x "$TS_CLI" ] || return 0
+  command -v timeout >/dev/null 2>&1 || return 0
+
+  timeout 12 "$TS_CLI" status >/dev/null 2>&1
+  result=$?
+  case "$result" in
+    124|137|143) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
 start_watchdog() {
   if watchdog_running; then
     log "watchdog already running"
@@ -635,12 +648,14 @@ start_watchdog() {
   fi
   (
     log "watchdog started"
+    health_failures=0
     while true; do
       sleep 60
       if ! is_running; then
         log "watchdog: tailscaled is not running; restarting"
         start_daemon || true
         wait_for_socket || true
+        health_failures=0
         continue
       fi
       if [ ! -S "$SOCK" ]; then
@@ -649,6 +664,22 @@ start_watchdog() {
         sleep 2
         start_daemon || true
         wait_for_socket || true
+        health_failures=0
+        continue
+      fi
+      if daemon_responding; then
+        health_failures=0
+      else
+        health_failures=$((health_failures + 1))
+        log "watchdog: tailscaled health probe timed out ($health_failures/3)"
+        if [ "$health_failures" -ge 3 ]; then
+          log "watchdog: tailscaled is unresponsive; restarting daemon"
+          killall tailscaled >> "$LOG" 2>&1 || true
+          sleep 2
+          start_daemon || true
+          wait_for_socket || true
+          health_failures=0
+        fi
       fi
     done
   ) &
@@ -681,8 +712,12 @@ case "$1" in
     sleep 1
     "$0" start
     ;;
+  reload-watchdog)
+    stop_watchdog
+    start_watchdog
+    ;;
   *)
-    echo "Usage: $0 {start|stop|restart}"
+    echo "Usage: $0 {start|stop|restart|reload-watchdog}"
     exit 1
     ;;
 esac
@@ -1852,7 +1887,7 @@ function Set-JetKvmTailscaleInitHook {
         throw "Failed to write robust Tailscale boot hook: $($write.Output)"
     }
 
-    $chmod = Invoke-JetKvmSshCommand -JetKvmAddress $JetKvmAddress -KeyPath $KeyPath -Command "chmod +x /userdata/init.d/S22tailscale 2>&1 && echo '[OK] robust boot hook installed'" -TimeoutSeconds 20
+    $chmod = Invoke-JetKvmSshCommand -JetKvmAddress $JetKvmAddress -KeyPath $KeyPath -Command "chmod +x /userdata/init.d/S22tailscale 2>&1 && /userdata/init.d/S22tailscale reload-watchdog 2>&1 && echo '[OK] robust boot hook installed and watchdog reloaded'" -TimeoutSeconds 20
     if ($chmod.Output -and $Log) { $chmod.Output -split "`n" | ForEach-Object { & $Log $_ } }
     if ($chmod.ExitCode -ne 0) {
         throw "Failed to make Tailscale boot hook executable: $($chmod.Output)"
@@ -3967,7 +4002,7 @@ Exit / cleanup
 Tailscale tab
 - Check Tailscale prints status, Tailscale IP, version, routes, DNS, and running Tailscale processes.
 - Check Tailscale also verifies the JetKVM boot hook at /userdata/init.d/S22tailscale so you can see whether Tailscale should survive reboot.
-- Repair Tailscale recreates JetFUEL's robust boot hook and watchdog, waits for tailscaled to create its socket, then reruns tailscale up with the current auth key/hostname settings or opens the manual login URL when no auth key is used.
+- Repair Tailscale recreates JetFUEL's robust boot hook and watchdog, waits for tailscaled to create its socket, then reruns tailscale up with the current auth key/hostname settings or opens the manual login URL when no auth key is used. The watchdog restarts an exited daemon, a daemon with no socket, or a daemon whose LocalAPI health probe hangs three times in succession.
 - Remove Tailscale logs out where possible, stops Tailscale, removes /userdata/tailscale, and reboots the JetKVM.
 
 Diagnostics tab
@@ -4030,7 +4065,7 @@ Troubleshooting
 - If winget reports that the application cannot be started, choose the App Installer repair option to open the Microsoft Store and install/reinstall App Installer, or choose the Git download option and install Git for Windows manually.
 - If Wake-on-LAN does not wake the Windows PC, confirm WOL is enabled in BIOS/UEFI, Windows adapter power management, and the NIC advanced driver settings. Prefer wired Ethernet; some Wi-Fi adapters and USB Ethernet adapters cannot wake a fully powered-off PC.
 - If the JetKVM stays in NeedsLogin, use Check Tailscale and look for a login URL in the log.
-- If Tailscale says "failed to connect to local tailscaled", the daemon did not start or its socket was not ready. Run Repair Tailscale; JetFUEL writes a boot hook that waits for networking and /dev/net/tun before starting tailscaled, then keeps a small watchdog running to restart it if it later exits.
+- If Tailscale says "failed to connect to local tailscaled", the daemon did not start, its socket was not ready, or its LocalAPI is hung. Run Repair Tailscale; JetFUEL writes a boot hook that waits for networking and /dev/net/tun before starting tailscaled, then keeps a watchdog running to restart it after an exit, a missing socket, or three consecutive timed-out health probes.
 - Tailscale auth keys should be full pre-authentication secrets beginning with tskey-auth-. The key ID ending CNTRL is not enough.
 - Newer OpenSSH clients can print "connection is not using a post-quantum key exchange algorithm" when talking to JetKVM SSH. JetFUEL suppresses it where supported; it is an SSH warning and should not be treated as the Tailscale install failure.
 - Tailscale installation may fail if the JetKVM itself is set up/authenticated using Google auth. Use local JetKVM authentication for this SSH/Developer Mode flow.
@@ -4313,7 +4348,7 @@ Status log
     $tailscaleHelp.Dock = "Fill"
     $tailscaleHelp.ForeColor = $ui.Muted
     $tailscaleHelp.Font = [Drawing.Font]::new("Segoe UI", 9)
-    $tailscaleHelp.Text = "Check Tailscale prints status, routes, DNS, version, running processes, and whether the JetFUEL watchdog is installed/running.`r`nRepair Tailscale recreates JetFUEL's robust boot hook and watchdog, waits for the tailscaled socket, then runs tailscale up using the current auth-key/hostname fields or opens a browser login URL when no auth key is used.`r`nRemove Tailscale logs out where possible, stops Tailscale, removes /userdata/tailscale, and reboots the JetKVM."
+    $tailscaleHelp.Text = "Check Tailscale prints status, routes, DNS, version, running processes, and whether the JetFUEL watchdog is installed/running.`r`nRepair Tailscale recreates JetFUEL's robust boot hook and watchdog, waits for the tailscaled socket, then runs tailscale up using the current auth-key/hostname fields or opens a browser login URL when no auth key is used. The watchdog also restarts tailscaled after three consecutive timed-out health probes.`r`nRemove Tailscale logs out where possible, stops Tailscale, removes /userdata/tailscale, and reboots the JetKVM."
     $tailscaleHelpGroup.Controls.Add($tailscaleHelp)
     $tailscaleLayout.Controls.Add($tailscaleHelpGroup, 0, 1)
 
