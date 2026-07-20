@@ -1158,7 +1158,7 @@ ps 2>&1 | grep -E 'jetkvm|tailscale|venc|vpss|vps|rga|valloc|sys|vlog' | grep -v
 
 section "NETWORK"
 if command -v ip >/dev/null 2>&1; then
-  ip -brief addr 2>&1 || ip addr 2>&1 || true
+  ip addr 2>&1 || true
   ip route 2>&1 || true
 else
   ifconfig 2>&1 || true
