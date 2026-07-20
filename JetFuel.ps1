@@ -1171,9 +1171,9 @@ df -h 2>&1 || true
 
 section "TAILSCALE"
 if command -v tailscale >/dev/null 2>&1; then
-  run_with_timeout 10 tailscale status 2>&1 || true
-  tailscale ip -4 2>&1 || true
-  tailscale version 2>&1 || true
+  run_with_timeout 8 tailscale status 2>&1 || echo '[WARN] tailscale status did not complete within 8 seconds'
+  run_with_timeout 8 tailscale ip -4 2>&1 || echo '[WARN] tailscale ip did not complete within 8 seconds'
+  run_with_timeout 8 tailscale version 2>&1 || echo '[WARN] tailscale version did not complete within 8 seconds'
 else
   echo '[INFO] tailscale command is not installed'
 fi
@@ -1223,9 +1223,10 @@ section "JETKVM CRASH DUMPS"
 if [ -d /userdata/jetkvm/crashdump ]; then
   ls -lah /userdata/jetkvm/crashdump 2>&1 || true
   for crash_file in /userdata/jetkvm/crashdump/*.log; do
-    [ -f "$crash_file" ] || continue
-    echo "--- $crash_file (last 250 lines) ---"
-    tail -n 250 "$crash_file" 2>&1 || true
+    [ -f $crash_file ] || continue
+    echo '--- crash log, last 250 lines ---'
+    echo $crash_file
+    tail -n 250 $crash_file 2>&1 || true
   done
 else
   echo '[OK] no crashdump directory exists'
@@ -1259,6 +1260,26 @@ echo
 echo '[OK] full diagnostic report complete'
 '@
     return ($quick + $detail)
+}
+
+function Get-JetKvmCrashLogsCommand {
+    return @'
+echo '--- JetKVM crash files ---'
+if [ -d /userdata/jetkvm/crashdump ]; then
+  ls -lah /userdata/jetkvm/crashdump 2>&1 || true
+  found=0
+  for crash_file in /userdata/jetkvm/crashdump/*.log /userdata/jetkvm/crashdump/*.txt; do
+    [ -f $crash_file ] || continue
+    found=1
+    echo '--- crash log, last 250 lines ---'
+    echo $crash_file
+    tail -n 250 $crash_file 2>&1 || true
+  done
+  if [ $found -eq 0 ]; then echo '[INFO] no text crash logs found'; fi
+else
+  echo '[OK] no crashdump directory exists'
+fi
+'@
 }
 
 function Get-JetKvmManualAppUpdateCommand {
@@ -5498,22 +5519,7 @@ Status log
         try {
             $target = & $getJetKvmSshTarget
             & $setBusy $true "Reading crash logs..."
-            $command = @'
-echo '--- JetKVM crash files ---'
-if [ -d /userdata/jetkvm/crashdump ]; then
-  ls -lah /userdata/jetkvm/crashdump 2>&1 || true
-  found=0
-  for crash_file in /userdata/jetkvm/crashdump/*.log /userdata/jetkvm/crashdump/*.txt; do
-    [ -f "$crash_file" ] || continue
-    found=1
-    echo "--- $crash_file (last 250 lines) ---"
-    tail -n 250 "$crash_file" 2>&1 || true
-  done
-  if [ "$found" -eq 0 ]; then echo '[INFO] no text crash logs found'; fi
-else
-  echo '[OK] no crashdump directory exists'
-fi
-'@
+            $command = Get-JetKvmCrashLogsCommand
             $result = Invoke-JetKvmSshCommand -JetKvmAddress $target.Ip -KeyPath $target.KeyPath -Command $command -TimeoutSeconds 75
             & $writeSshOutput $result
             if ($result.TimedOut) { throw "Reading the JetKVM crash logs timed out." }
