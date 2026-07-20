@@ -47,6 +47,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\JetFuel.ps1
 - Supports clean Tailscale installs.
 - Provides Tailscale check, repair, and remove actions.
 - Checks and repairs the JetKVM Tailscale boot hook at `/userdata/init.d/S22tailscale`.
+- Provides a Diagnostics tab for health checks, D-state process detection, JetKVM app/crash logs, saveable support reports, reboot tools, OTA access, and guarded DFU recovery resources.
 - Keeps colour-coded logs and a copy-log button.
 - Provides an Identity tab for JetKVM MAC status, generated local-administered MAC profiles, custom MAC override, and clearing the user override.
 - Loads JetKVM's default EDID/USB identity presets, scans the Windows PC for monitor EDID and USB keyboard/mouse VID/PID candidates, then lets you choose human-readable display and USB identity candidates.
@@ -167,6 +168,31 @@ Hostname changes are written to `/userdata/kvm_config.json`, `/etc/hostname`, an
 
 JetFUEL does not currently set the local JetKVM password. Use JetKVM Settings > Access for that flow. JetKVM's Hide Header and Hide Status Bar options are browser UI preferences, not device config values, so JetFUEL does not push them globally over SSH.
 
+## Diagnostics, Updates, And Recovery
+
+The `Diagnostics` tab uses the Setup tab JetKVM address and SSH key. Its health actions are read-only:
+
+- `Quick check` collects the JetKVM build/system versions, uptime and load, memory, uninterruptible D-state processes, important services, network, storage, Tailscale state, JetFUEL boot-hook/watchdog state, and recent kernel messages.
+- `Save full report` adds the process list, `/userdata/jetkvm/last.log`, text crash logs from `/userdata/jetkvm/crashdump`, display/USB state, thermal readings, persistent-file inventory, and the full kernel log.
+- `View app log` and `View crash logs` load the relevant debug text into JetFUEL's colour-coded status log.
+
+Diagnostic reports can contain IP and MAC addresses, device identifiers, and application log content. Review a saved report before sharing it.
+
+Restart and update actions have different scopes:
+
+- `Reboot JetKVM` requests a normal Linux reboot.
+- `Force reboot` uses `reboot -f`, skips the normal orderly shutdown path, and is only for a device that will not recover with a normal reboot.
+- A true electrical power cycle cannot be performed by software running on the JetKVM after its own input power has been removed. Use switched USB/PoE power, an independent smart plug, or physically disconnect and restore power.
+- `Open OTA settings` opens the JetKVM UI. Settings > General > Check for Updates is the recommended update path.
+- `Manual app update` is an advanced fallback. It queries JetKVM's official release API for the detected hardware SKU, verifies the app SHA-256, stages the app, and reboots. It updates the app component only and bypasses the normal staged rollout.
+
+The recovery downloads are not routine update tools:
+
+- [DriverAssistant v5.14](https://github.com/jetkvm/rv1106-system/releases/download/v0.2.5/DriverAssitant_v5.14.zip) installs the Rockchip USB recovery driver on Windows.
+- [SocToolKit v2.5](https://github.com/jetkvm/rv1106-system/releases/download/v0.2.5/SocToolKit_v2.5_20250701_01_win.zip) flashes a recovery image while the JetKVM is physically placed into Maskrom/DFU mode.
+- The [latest jetkvm-v2 recovery image](https://api.jetkvm.com/releases/system_recovery/latest?sku=jetkvm-v2) must only be used for the matching hardware SKU.
+- Follow the [official JetKVM factory reset/DFU guide](https://jetkvm.com/docs/advanced-usage/factory-reset-dfu). Recovery flashing can erase or reset the device.
+
 ## Tailscale Auth Key Notes
 
 Tailscale auth keys are optional.
@@ -204,6 +230,9 @@ Use the red `EXIT` button in the wizard header when you are finished.
 - If Wake-on-LAN does not wake the Windows PC, confirm WOL is enabled in BIOS/UEFI, Windows adapter power management, and the NIC advanced driver settings. Prefer wired Ethernet. Some Wi-Fi adapters and USB Ethernet adapters cannot wake a fully powered-off PC.
 - If BIOS prep reports unsupported or missing settings, the local model may use different firmware setting names. Check the vendor BIOS tool/download page for that model and use the BIOS UI manually where needed.
 - If the BIOS tab reports a bundled ConfigJon script is missing, rerun the latest `irm https://tails.revhooks.cc | iex` bootstrap so the `third_party\ConfigJon-Firmware-Management` files are downloaded.
+- If JetKVM video or services become slow or unresponsive, run Diagnostics > Quick check and inspect `UPTIME AND LOAD` plus `D-STATE PROCESSES`. Save a full report before rebooting if the fault is repeatable.
+- If the JetKVM app crashes, use Diagnostics > View app log and View crash logs. A saved full report includes those text logs and kernel messages for support analysis.
+- Use normal OTA updates before the manual app updater. Use DriverAssistant/SocToolKit only for physical DFU recovery, not as general Windows or JetKVM update utilities.
 
 ## Disclaimer
 
