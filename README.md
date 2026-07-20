@@ -92,7 +92,7 @@ The JetKVM target write creates a timestamped backup of `/userdata/kvm_config.js
 
 ## BIOS Prep (Dell/HP/Lenovo)
 
-The `BIOS - WARNING` tab is optional and only affects the Windows PC running JetFUEL. It is not part of `Step 5 - Run install` and never runs automatically.
+The `BIOS - WARNING` tab is optional and only affects the Windows PC running JetFUEL. It is not part of the Tailscale installation workflow and never runs automatically.
 
 JetFUEL bundles pinned copies of ConfigJon Firmware-Management scripts for Dell, HP, and Lenovo so it can:
 
@@ -120,21 +120,17 @@ Useful vendor resources:
 
 ## Wizard Flow
 
-1. Enter the JetKVM IP address or hostname.
-2. Click `Run preflight` in Step 1.
-3. Create or select an SSH key.
-4. Click `Copy public key`.
-5. Open the JetKVM UI.
-6. In JetKVM Settings > Advanced, enable Developer Mode and paste the SSH public key.
-7. Save the JetKVM settings.
-8. Choose Tailscale options.
-9. Click `Step 5 - Run install`.
+1. In `1 - Deployment details`, enter the JetKVM address, optional Tailscale name/auth key, SSH key, and installer options.
+2. In `2 - Preflight checks`, click `Run preflight`.
+3. In `3 - Developer Mode SSH required`, click `Copy public key` and open the JetKVM UI.
+4. In JetKVM Settings > Advanced, enable Developer Mode, paste the SSH public key, and save.
+5. Click `4 - Install Tailscale`.
 
 After Tailscale is online, you can remove the SSH public key from JetKVM or disable Developer Mode again if you do not need SSH access.
 
 ## Installer Script Sources
 
-Step 3 lets you choose which install script to use:
+The `Install script` field in Deployment details lets you choose which install script to use:
 
 - `Official JetKVM`: downloads JetKVM's current hosted installer script.
 - `JetFUEL repo`: uses the local reference copy stored in this repository.

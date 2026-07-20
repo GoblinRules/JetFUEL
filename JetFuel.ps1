@@ -3619,7 +3619,7 @@ function Start-JetFuelGuiV2 {
     $title.AutoSize = $true
     $title.Location = [Drawing.Point]::new((S 62), (S 9))
     $subtitle = [Windows.Forms.Label]::new()
-    $subtitle.Text = "Follow the steps from top to bottom. Run preflight first to confirm this PC can see the JetKVM."
+    $subtitle.Text = "Enter the deployment details, run preflight, enable Developer Mode SSH, then install."
     $subtitle.AutoSize = $true
     $subtitle.ForeColor = $ui.Muted
     $subtitle.Location = [Drawing.Point]::new((S 64), (S 36))
@@ -3864,10 +3864,10 @@ function Start-JetFuelGuiV2 {
     $setupLayout.AutoScroll = $false
     $setupLayout.BackColor = $ui.Window
     $setupLayout.ColumnCount = 1
-    $setupLayout.RowCount = 5
+    $setupLayout.RowCount = 4
     $setupLayout.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
-    # The step groups size themselves to their content; only the action row is fixed.
-    for ($i = 0; $i -lt 4; $i++) {
+    # The setup sections size themselves to their content; only the action row is fixed.
+    for ($i = 0; $i -lt 3; $i++) {
         $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::AutoSize)) | Out-Null
     }
     $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, (S 46))) | Out-Null
@@ -3957,38 +3957,36 @@ Use the tabs from left to right.
 
 Setup tab
 - This is the main guided workflow for installing Tailscale on a JetKVM.
-- Complete Step 1 through Step 4 first, then run Step 5.
+- The commonly used deployment fields are kept together so a normal install does not require scrolling between separate input sections.
+- Complete sections 1 through 3, then run section 4.
 
-Step 1 - Prechecks
-- Run preflight checks that this Windows PC has bash and SSH tools available.
-- Checks whether the JetKVM responds on the network and whether the web UI is reachable.
-- Checks SSH login after you enable Developer Mode and add the public SSH key.
-
-Step 2 - JetKVM and SSH
+1 - Deployment details
 - Enter the JetKVM IP address or hostname.
+- Optionally set the Tailscale device name and provide a full tskey-auth- pre-authentication secret for automatic enrolment.
 - Choose the SSH private key path used by the wizard.
 - If the key does not exist, the wizard can create it.
 - Choose whether the SSH key has no passphrase or a passphrase.
-- Open UI opens the JetKVM web interface.
-
-Step 3 - Tailscale options
-- Install script selects which installer Step 5 uses:
+- Select the installer source and whether to perform a clean Tailscale install.
+- Hover over a field for concise guidance; Settings contains advanced installer-source details.
+- Install script selects which installer section 4 uses:
   - Official JetKVM: downloads JetKVM's current hosted installer script.
   - JetFUEL repo: uses the local copied reference/fallback script stored with this wizard.
   - Custom URL: downloads a custom compatible installer URL from Settings.
   - Local file: uses a custom compatible installer file path from Settings.
-- Use a Tailscale auth key if you want the JetKVM to join your tailnet automatically.
-- Auth keys should usually start with tskey-auth-. The key ID shown in the admin table is not enough.
-- Tailscale hostname is optional, but if used it must be lowercase letters, numbers, and hyphens only.
 - Clean Tailscale install removes the old Tailscale identity on the JetKVM and creates a new machine identity.
 
-Step 4 - Required JetKVM UI steps
+2 - Preflight checks
+- Checks that this Windows PC has Git Bash, winget, and SSH tools available.
+- Checks whether the JetKVM responds on the network and whether the web UI is reachable.
+- Checks SSH login after you enable Developer Mode and add the public SSH key.
+
+3 - Developer Mode SSH required
 - Developer Mode SSH must be enabled before the install can run.
 - Copy public key copies the SSH public key to your clipboard.
 - Paste that key into JetKVM Settings > Advanced > Developer Mode, then save the JetKVM settings.
 - After Tailscale is online, you can remove the SSH public key or disable Developer Mode again if you do not need SSH access.
 
-Step 5 - Run install
+4 - Install Tailscale
 - Runs preflight checks, downloads or loads the selected installer script, patches SSH handling for the chosen key, and starts the install.
 - The JetKVM will reboot during installation.
 - If no auth key is supplied, the wizard will look for a Tailscale browser login URL and wait for login to complete.
@@ -4109,43 +4107,35 @@ Status log
     $main.Controls.Add($pageShell, 0, 1)
     & $showPage "Setup"
 
-    $precheckGroup = New-Group "Step 1 - Prechecks"
-    & $makeGroupAutoHeight $precheckGroup
-    $preGrid = New-StepGrid 3
-    $preGrid.RowStyles.Clear()
-    foreach ($height in @(25, 25, 25)) {
-        $preGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, (S $height))) | Out-Null
-    }
-    $precheckGroup.Controls.Add($preGrid)
-    $bashStatus = New-RowLabel "[ ] Git Bash: not checked"
-    $sshStatus = New-RowLabel "[ ] SSH tools: not checked"
-    $wingetStatus = New-RowLabel "[ ] winget: not checked"
-    $sshLoginStatus = New-RowLabel "[ ] JetKVM SSH login: enable Developer Mode first"
-    $kvmStatus = New-RowLabel "[ ] JetKVM network: enter IP, then preflight"
-    $httpStatus = New-RowLabel "[ ] JetKVM web UI: not checked"
-    $preflightButton = [Windows.Forms.Button]::new()
-    $preflightButton.Text = "Run preflight"
-    $preflightButton.Dock = "Fill"
-    $preflightButton.Margin = New-ScaledPadding 8 3 8 3
-    Set-ButtonStyle $preflightButton "Secondary"
-    $preGrid.Controls.Add($bashStatus, 0, 0)
-    $preGrid.Controls.Add($kvmStatus, 1, 0)
-    $preGrid.Controls.Add($sshStatus, 0, 1)
-    $preGrid.Controls.Add($httpStatus, 1, 1)
-    $preGrid.Controls.Add($wingetStatus, 0, 2)
-    $preGrid.Controls.Add($sshLoginStatus, 1, 2)
-    $preGrid.Controls.Add($preflightButton, 2, 0)
-    $preGrid.SetRowSpan($preflightButton, 2)
-    $setupLayout.Controls.Add($precheckGroup, 0, 0)
+    $setupTips = [Windows.Forms.ToolTip]::new()
+    $setupTips.AutoPopDelay = 12000
+    $setupTips.InitialDelay = 350
+    $setupTips.ReshowDelay = 100
 
-    $step2Group = New-Group "Step 2 - JetKVM and SSH"
-    & $makeGroupAutoHeight $step2Group
-    $step2Grid = New-StepGrid 4
-    $step2Grid.RowStyles.Clear()
-    foreach ($height in @(30, 30, 28, 30)) {
-        $step2Grid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, (S $height))) | Out-Null
+    $deploymentGroup = New-Group "1 - Deployment details"
+    & $makeGroupAutoHeight $deploymentGroup
+    $deploymentColumns = [Windows.Forms.TableLayoutPanel]::new()
+    $deploymentColumns.Dock = "Top"
+    $deploymentColumns.AutoSize = $true
+    $deploymentColumns.AutoSizeMode = [Windows.Forms.AutoSizeMode]::GrowAndShrink
+    $deploymentColumns.ColumnCount = 2
+    $deploymentColumns.RowCount = 1
+    $deploymentColumns.Padding = New-ScaledPadding 4 8 4 3
+    $deploymentColumns.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 50)) | Out-Null
+    $deploymentColumns.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 50)) | Out-Null
+    $deploymentGroup.Controls.Add($deploymentColumns)
+
+    $connectionGrid = New-StepGrid 4
+    $connectionGrid.Dock = "Fill"
+    $connectionGrid.Padding = New-ScaledPadding 0 0 8 0
+    $connectionGrid.ColumnStyles.Clear()
+    $connectionGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, (S 122))) | Out-Null
+    $connectionGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
+    $connectionGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, (S 108))) | Out-Null
+    $connectionGrid.RowStyles.Clear()
+    foreach ($height in @(29, 29, 27, 29)) {
+        $connectionGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, (S $height))) | Out-Null
     }
-    $step2Group.Controls.Add($step2Grid)
     $ipBox = New-Field ""
     $keyBox = New-Field (Join-Path $HOME ".ssh\id_rsa_jetkvm")
     $passBox = New-Field ""
@@ -4160,39 +4150,42 @@ Status log
     $browseButton.Dock = "Fill"
     Set-ButtonStyle $browseButton "Secondary"
     $createKeyCheck = [Windows.Forms.CheckBox]::new()
-    $createKeyCheck.Text = "Create this SSH key if it does not exist"
+    $createKeyCheck.Text = "Create SSH key if missing"
     $createKeyCheck.Checked = $true
     $createKeyCheck.Dock = "Fill"
+    $createKeyCheck.AutoEllipsis = $true
     Set-CheckStyle $createKeyCheck
     $noPassCheck = [Windows.Forms.CheckBox]::new()
-    $noPassCheck.Text = "No passphrase"
+    $noPassCheck.Text = "None"
     $noPassCheck.Checked = $true
     $noPassCheck.Dock = "Fill"
+    $noPassCheck.AutoEllipsis = $true
     Set-CheckStyle $noPassCheck
-    $step2Grid.Controls.Add((New-RowLabel "JetKVM IP or hostname"), 0, 0)
-    $step2Grid.Controls.Add($ipBox, 1, 0)
-    $step2Grid.Controls.Add($openUiButton, 2, 0)
-    $step2Grid.Controls.Add((New-RowLabel "SSH private key path"), 0, 1)
-    $step2Grid.Controls.Add($keyBox, 1, 1)
-    $step2Grid.Controls.Add($browseButton, 2, 1)
-    $step2Grid.Controls.Add($createKeyCheck, 1, 2)
-    $step2Grid.Controls.Add((New-RowLabel "SSH key passphrase"), 0, 3)
-    $step2Grid.Controls.Add($passBox, 1, 3)
-    $step2Grid.Controls.Add($noPassCheck, 2, 3)
-    $setupLayout.Controls.Add($step2Group, 0, 1)
+    $setupTips.SetToolTip($noPassCheck, "Use no passphrase for the SSH private key.")
+    $connectionGrid.Controls.Add((New-RowLabel "JetKVM address"), 0, 0)
+    $connectionGrid.Controls.Add($ipBox, 1, 0)
+    $connectionGrid.Controls.Add($openUiButton, 2, 0)
+    $connectionGrid.Controls.Add((New-RowLabel "SSH private key"), 0, 1)
+    $connectionGrid.Controls.Add($keyBox, 1, 1)
+    $connectionGrid.Controls.Add($browseButton, 2, 1)
+    $connectionGrid.Controls.Add($createKeyCheck, 1, 2)
+    $connectionGrid.SetColumnSpan($createKeyCheck, 2)
+    $connectionGrid.Controls.Add((New-RowLabel "Key passphrase"), 0, 3)
+    $connectionGrid.Controls.Add($passBox, 1, 3)
+    $connectionGrid.Controls.Add($noPassCheck, 2, 3)
+    $deploymentColumns.Controls.Add($connectionGrid, 0, 0)
 
-    $step3Group = New-Group "Step 3 - Tailscale options"
-    & $makeGroupAutoHeight $step3Group
-    $step3Grid = New-StepGrid 10
-    $step3Grid.ColumnStyles.Clear()
-    $step3Grid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, (S 145))) | Out-Null
-    $step3Grid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
-    $step3Grid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, (S 4))) | Out-Null
-    $step3Grid.RowStyles.Clear()
-    foreach ($height in @(30, 24, 26, 26, 30, 30, 30, 24, 30, 26)) {
-        $step3Grid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, (S $height))) | Out-Null
+    $tailscaleGrid = New-StepGrid 5
+    $tailscaleGrid.Dock = "Fill"
+    $tailscaleGrid.Padding = New-ScaledPadding 8 0 0 0
+    $tailscaleGrid.ColumnStyles.Clear()
+    $tailscaleGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, (S 120))) | Out-Null
+    $tailscaleGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
+    $tailscaleGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, (S 4))) | Out-Null
+    $tailscaleGrid.RowStyles.Clear()
+    foreach ($height in @(29, 27, 29, 29, 29)) {
+        $tailscaleGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, (S $height))) | Out-Null
     }
-    $step3Group.Controls.Add($step3Grid)
     $installerSourceBox = [Windows.Forms.ComboBox]::new()
     $installerSourceBox.Dock = "Fill"
     $installerSourceBox.DropDownStyle = [Windows.Forms.ComboBoxStyle]::DropDownList
@@ -4202,61 +4195,106 @@ Status log
     $installerSourceBox.Font = [Drawing.Font]::new("Segoe UI", 9)
     [void]$installerSourceBox.Items.AddRange(@("Official JetKVM", "JetFUEL repo", "Custom URL", "Local file"))
     $installerSourceBox.SelectedItem = "Official JetKVM"
-    $installerSourceHelp = New-RowLabel "Default uses JetKVM's current script. See Settings for the local reference copy and custom source requirements."
     $cleanCheck = [Windows.Forms.CheckBox]::new()
-    $cleanCheck.Text = "Clean Tailscale install on JetKVM (creates a new Tailscale machine identity)"
+    $cleanCheck.Text = "Clean install (new identity)"
     $cleanCheck.Dock = "Fill"
+    $cleanCheck.AutoEllipsis = $true
     Set-CheckStyle $cleanCheck
     $useAuthKeyCheck = [Windows.Forms.CheckBox]::new()
-    $useAuthKeyCheck.Text = "Use a Tailscale auth key to connect automatically"
+    $useAuthKeyCheck.Text = "Auth key"
     $useAuthKeyCheck.Dock = "Fill"
+    $useAuthKeyCheck.AutoEllipsis = $true
     Set-CheckStyle $useAuthKeyCheck
     $authBox = New-Field ""
     $authBox.UseSystemPasswordChar = $true
     $authBox.Enabled = $false
-    $authHelp = New-RowLabel "Paste the full tskey-auth-... secret shown when creating the key. The key ID ending CNTRL in the admin table is not enough."
     $hostBox = New-Field ""
-    $hostHelp = New-RowLabel "Lowercase letters, numbers, and hyphens only. Cannot start or end with a hyphen."
     $versionBox = New-Field "1.96.4"
-    $versionNote = New-RowLabel "Default is pinned for JetKVM compatibility. Change only if you know the version works on your device."
-    $step3Grid.Controls.Add((New-RowLabel "Install script"), 0, 0)
-    $step3Grid.Controls.Add($installerSourceBox, 1, 0)
-    $step3Grid.SetColumnSpan($installerSourceBox, 2)
-    $step3Grid.Controls.Add($installerSourceHelp, 1, 1)
-    $step3Grid.SetColumnSpan($installerSourceHelp, 2)
-    $step3Grid.Controls.Add($cleanCheck, 1, 2)
-    $step3Grid.SetColumnSpan($cleanCheck, 2)
-    $step3Grid.Controls.Add($useAuthKeyCheck, 1, 3)
-    $step3Grid.SetColumnSpan($useAuthKeyCheck, 2)
-    $step3Grid.Controls.Add((New-RowLabel "Tailscale auth key"), 0, 4)
-    $step3Grid.Controls.Add($authBox, 1, 4)
-    $step3Grid.SetColumnSpan($authBox, 2)
-    $step3Grid.Controls.Add($authHelp, 1, 5)
-    $step3Grid.SetColumnSpan($authHelp, 2)
-    $step3Grid.Controls.Add((New-RowLabel "Tailscale hostname"), 0, 6)
-    $step3Grid.Controls.Add($hostBox, 1, 6)
-    $step3Grid.SetColumnSpan($hostBox, 2)
-    $step3Grid.Controls.Add($hostHelp, 1, 7)
-    $step3Grid.SetColumnSpan($hostHelp, 2)
-    $step3Grid.Controls.Add((New-RowLabel "Tailscale version"), 0, 8)
-    $step3Grid.Controls.Add($versionBox, 1, 8)
-    $step3Grid.SetColumnSpan($versionBox, 2)
-    $step3Grid.Controls.Add($versionNote, 1, 9)
-    $step3Grid.SetColumnSpan($versionNote, 2)
-    $setupLayout.Controls.Add($step3Group, 0, 2)
+    $installOptions = [Windows.Forms.TableLayoutPanel]::new()
+    $installOptions.Dock = "Fill"
+    $installOptions.Margin = [Windows.Forms.Padding]::new(0)
+    $installOptions.ColumnCount = 2
+    $installOptions.RowCount = 1
+    $installOptions.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 36)) | Out-Null
+    $installOptions.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 64)) | Out-Null
+    $installOptions.Controls.Add($useAuthKeyCheck, 0, 0)
+    $installOptions.Controls.Add($cleanCheck, 1, 0)
+    $tailscaleGrid.Controls.Add((New-RowLabel "Tailscale name"), 0, 0)
+    $tailscaleGrid.Controls.Add($hostBox, 1, 0)
+    $tailscaleGrid.SetColumnSpan($hostBox, 2)
+    $tailscaleGrid.Controls.Add($installOptions, 1, 1)
+    $tailscaleGrid.SetColumnSpan($installOptions, 2)
+    $tailscaleGrid.Controls.Add((New-RowLabel "Auth key"), 0, 2)
+    $tailscaleGrid.Controls.Add($authBox, 1, 2)
+    $tailscaleGrid.SetColumnSpan($authBox, 2)
+    $tailscaleGrid.Controls.Add((New-RowLabel "Install script"), 0, 3)
+    $tailscaleGrid.Controls.Add($installerSourceBox, 1, 3)
+    $tailscaleGrid.SetColumnSpan($installerSourceBox, 2)
+    $tailscaleGrid.Controls.Add((New-RowLabel "Tailscale version"), 0, 4)
+    $tailscaleGrid.Controls.Add($versionBox, 1, 4)
+    $tailscaleGrid.SetColumnSpan($versionBox, 2)
+    $deploymentColumns.Controls.Add($tailscaleGrid, 1, 0)
+    $setupTips.SetToolTip($ipBox, "Enter the JetKVM IPv4 address or resolvable hostname.")
+    $setupTips.SetToolTip($keyBox, "Private SSH key used for Developer Mode access. SSH key files are retained during cleanup.")
+    $setupTips.SetToolTip($createKeyCheck, "Create the selected SSH key when it does not already exist.")
+    $setupTips.SetToolTip($hostBox, "Optional Tailscale device name: lowercase letters, numbers, and hyphens only; no leading or trailing hyphen.")
+    $setupTips.SetToolTip($useAuthKeyCheck, "Enable automatic tailnet enrolment. Leave clear to authenticate using the browser login URL.")
+    $setupTips.SetToolTip($authBox, "Paste the full tskey-auth-... pre-authentication secret. The key ID ending CNTRL is not sufficient.")
+    $setupTips.SetToolTip($cleanCheck, "Remove the existing Tailscale state and create a new machine identity.")
+    $setupTips.SetToolTip($installerSourceBox, "Official JetKVM is the default. See Settings for reference, custom URL, and local-file details.")
+    $setupTips.SetToolTip($versionBox, "Pinned for JetKVM compatibility. Change only when you have verified another version.")
+    $setupLayout.Controls.Add($deploymentGroup, 0, 0)
 
-    $manualSteps = New-Group "Step 4 - Required JetKVM UI steps"
+    $precheckGroup = New-Group "2 - Preflight checks"
+    & $makeGroupAutoHeight $precheckGroup
+    $preGrid = New-StepGrid 2
+    $preGrid.ColumnCount = 4
+    $preGrid.ColumnStyles.Clear()
+    foreach ($percent in @(23, 25, 29)) {
+        $preGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, $percent)) | Out-Null
+    }
+    $preGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, (S 132))) | Out-Null
+    $preGrid.RowStyles.Clear()
+    foreach ($height in @(24, 24)) {
+        $preGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, (S $height))) | Out-Null
+    }
+    $precheckGroup.Controls.Add($preGrid)
+    $bashStatus = New-RowLabel "[ ] Git Bash: not checked"
+    $sshStatus = New-RowLabel "[ ] SSH tools: not checked"
+    $wingetStatus = New-RowLabel "[ ] winget: not checked"
+    $sshLoginStatus = New-RowLabel "[ ] SSH login: enable Developer Mode first"
+    $kvmStatus = New-RowLabel "[ ] JetKVM network: not checked"
+    $httpStatus = New-RowLabel "[ ] JetKVM web UI: not checked"
+    foreach ($label in @($bashStatus, $sshStatus, $wingetStatus, $sshLoginStatus, $kvmStatus, $httpStatus)) {
+        $label.AutoEllipsis = $true
+    }
+    $preflightButton = [Windows.Forms.Button]::new()
+    $preflightButton.Text = "Run preflight"
+    $preflightButton.Dock = "Fill"
+    $preflightButton.Margin = New-ScaledPadding 8 2 8 2
+    Set-ButtonStyle $preflightButton "Secondary"
+    $preGrid.Controls.Add($bashStatus, 0, 0)
+    $preGrid.Controls.Add($kvmStatus, 1, 0)
+    $preGrid.Controls.Add($sshLoginStatus, 2, 0)
+    $preGrid.Controls.Add($sshStatus, 0, 1)
+    $preGrid.Controls.Add($httpStatus, 1, 1)
+    $preGrid.Controls.Add($wingetStatus, 2, 1)
+    $preGrid.Controls.Add($preflightButton, 3, 0)
+    $preGrid.SetRowSpan($preflightButton, 2)
+    $setupLayout.Controls.Add($precheckGroup, 0, 1)
+
+    $manualSteps = New-Group "3 - Developer Mode SSH required"
     & $makeGroupAutoHeight $manualSteps
     $manualSteps.BackColor = [Drawing.Color]::FromArgb(69, 46, 16)
     $manualSteps.ForeColor = [Drawing.Color]::FromArgb(253, 230, 138)
-    $manualGrid = New-StepGrid 3
+    $manualGrid = New-StepGrid 2
     $manualGrid.RowStyles.Clear()
-    foreach ($height in @(40, 28, 24)) {
+    foreach ($height in @(24, 24)) {
         $manualGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, (S $height))) | Out-Null
     }
     $manualSteps.Controls.Add($manualGrid)
     $stepsText = [Windows.Forms.Label]::new()
-    $stepsText.Text = "Important: Step 5 needs Developer Mode SSH enabled on the JetKVM.`r`n1. Open the JetKVM UI and install any system updates.  2. Settings > Advanced: enable Developer Mode, paste the public SSH key, then save."
+    $stepsText.Text = "Required: open JetKVM Settings > Advanced, enable Developer Mode, paste the public SSH key, and save. Install JetKVM updates first."
     $stepsText.Dock = "Fill"
     $stepsText.ForeColor = [Drawing.Color]::FromArgb(255, 251, 235)
     $stepsText.Font = [Drawing.Font]::new("Segoe UI", 9, [Drawing.FontStyle]::Bold)
@@ -4277,12 +4315,11 @@ Status log
     Set-ButtonStyle $openUiButton2 "Secondary"
     $manualGrid.Controls.Add($stepsText, 0, 0)
     $manualGrid.SetColumnSpan($stepsText, 2)
-    $manualGrid.SetRowSpan($stepsText, 2)
-    $manualGrid.Controls.Add($securityText, 0, 2)
+    $manualGrid.Controls.Add($securityText, 0, 1)
     $manualGrid.SetColumnSpan($securityText, 2)
     $manualGrid.Controls.Add($copyKeyButton, 2, 0)
     $manualGrid.Controls.Add($openUiButton2, 2, 1)
-    $setupLayout.Controls.Add($manualSteps, 0, 3)
+    $setupLayout.Controls.Add($manualSteps, 0, 2)
 
     $statusLabel = [Windows.Forms.Label]::new()
     $statusLabel.Text = "Ready"
@@ -4298,13 +4335,13 @@ Status log
     $setupActionPanel.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
     $setupActionPanel.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, (S 184))) | Out-Null
     $runButton = [Windows.Forms.Button]::new()
-    $runButton.Text = "Step 5 - Run install"
+    $runButton.Text = "4 - Install Tailscale"
     $runButton.Dock = "Fill"
     $runButton.Margin = New-ScaledPadding 8 4 0 4
     Set-ButtonStyle $runButton "Primary"
     $setupActionPanel.Controls.Add($statusLabel, 0, 0)
     $setupActionPanel.Controls.Add($runButton, 1, 0)
-    $setupLayout.Controls.Add($setupActionPanel, 0, 4)
+    $setupLayout.Controls.Add($setupActionPanel, 0, 3)
 
     $actionPanel = [Windows.Forms.TableLayoutPanel]::new()
     $actionPanel.Dock = "Top"
