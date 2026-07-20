@@ -1105,6 +1105,21 @@ function ConvertTo-ShellSingleQuoted {
     return "'" + $Value.Replace("'", "'\''") + "'"
 }
 
+function ConvertTo-JetKvmEncodedShellCommand {
+    param([Parameter(Mandatory)][string]$Script)
+
+    $normalized = $Script.Replace("`r`n", "`n").Replace("`r", "`n")
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($normalized))
+    return "if command -v base64 >/dev/null 2>&1; then echo $encoded | base64 -d | sh; else echo '[FAIL] base64 applet is unavailable'; exit 127; fi"
+}
+
+function Remove-AnsiEscapeSequences {
+    param([AllowNull()][AllowEmptyString()][string]$Text)
+
+    if ([string]::IsNullOrEmpty($Text)) { return $Text }
+    return [regex]::Replace($Text, "$([char]27)\[[0-?]*[ -/]*[@-~]", "")
+}
+
 function Get-JetKvmQuickDiagnosticsCommand {
     return @'
 section() {
@@ -1188,7 +1203,7 @@ fi
 if [ -f /var/run/tailscale/jetfuel-watchdog.pid ]; then
   watchdog_pid="$(cat /var/run/tailscale/jetfuel-watchdog.pid 2>/dev/null || true)"
   if [ -n "$watchdog_pid" ] && ps | grep -q "^[[:space:]]*$watchdog_pid[[:space:]]"; then
-    echo "[OK] watchdog process running (PID $watchdog_pid)"
+    echo "[OK] watchdog process running PID $watchdog_pid"
   else
     echo '[WARN] watchdog PID file exists but process was not found'
   fi
@@ -5423,7 +5438,7 @@ Status log
     $writeSshOutput = {
         param($Result)
         if ($Result.Output) {
-            $Result.Output -split "`n" | ForEach-Object { & $log $_ }
+            (Remove-AnsiEscapeSequences -Text $Result.Output) -split "`n" | ForEach-Object { & $log $_ }
         }
     }
 
@@ -5443,7 +5458,8 @@ Status log
             $target = & $getJetKvmSshTarget
             & $setBusy $true "Running diagnostics..."
             & $log "--- JetKVM quick diagnostics ---"
-            $result = Invoke-JetKvmSshCommand -JetKvmAddress $target.Ip -KeyPath $target.KeyPath -Command (Get-JetKvmQuickDiagnosticsCommand) -TimeoutSeconds 75
+            $command = ConvertTo-JetKvmEncodedShellCommand -Script (Get-JetKvmQuickDiagnosticsCommand)
+            $result = Invoke-JetKvmSshCommand -JetKvmAddress $target.Ip -KeyPath $target.KeyPath -Command $command -TimeoutSeconds 75
             & $writeSshOutput $result
             if ($result.TimedOut) { throw "JetKVM quick diagnostics timed out after 75 seconds." }
             if ($result.ExitCode -ne 0) { throw "JetKVM quick diagnostics failed with exit code $($result.ExitCode)." }
@@ -5472,7 +5488,8 @@ Status log
 
             & $setBusy $true "Collecting full report..."
             & $log "--- Collecting full JetKVM diagnostic report ---"
-            $result = Invoke-JetKvmSshCommand -JetKvmAddress $target.Ip -KeyPath $target.KeyPath -Command (Get-JetKvmFullDiagnosticsCommand) -TimeoutSeconds 150
+            $command = ConvertTo-JetKvmEncodedShellCommand -Script (Get-JetKvmFullDiagnosticsCommand)
+            $result = Invoke-JetKvmSshCommand -JetKvmAddress $target.Ip -KeyPath $target.KeyPath -Command $command -TimeoutSeconds 150
             & $writeSshOutput $result
 
             $header = @(
@@ -5482,7 +5499,8 @@ Status log
                 "Privacy notice: this report may contain IP/MAC addresses, device identifiers, and application log content.",
                 ""
             ) -join [Environment]::NewLine
-            [IO.File]::WriteAllText($reportPath, ($header + $result.Output + [Environment]::NewLine), [Text.UTF8Encoding]::new($false))
+            $cleanReport = Remove-AnsiEscapeSequences -Text $result.Output
+            [IO.File]::WriteAllText($reportPath, ($header + $cleanReport + [Environment]::NewLine), [Text.UTF8Encoding]::new($false))
             & $log "Diagnostic report saved: $reportPath"
 
             if ($result.TimedOut) { throw "The full report timed out after 150 seconds. Partial output was saved to $reportPath" }
@@ -5502,7 +5520,7 @@ Status log
         try {
             $target = & $getJetKvmSshTarget
             & $setBusy $true "Reading app log..."
-            $command = "echo '--- /userdata/jetkvm/last.log (last 500 lines) ---'; if [ -f /userdata/jetkvm/last.log ]; then tail -n 500 /userdata/jetkvm/last.log 2>&1; else echo '[WARN] JetKVM app log was not found'; fi"
+            $command = ConvertTo-JetKvmEncodedShellCommand -Script "echo '--- /userdata/jetkvm/last.log (last 500 lines) ---'; if [ -f /userdata/jetkvm/last.log ]; then tail -n 500 /userdata/jetkvm/last.log 2>&1; else echo '[WARN] JetKVM app log was not found'; fi"
             $result = Invoke-JetKvmSshCommand -JetKvmAddress $target.Ip -KeyPath $target.KeyPath -Command $command -TimeoutSeconds 60
             & $writeSshOutput $result
             if ($result.TimedOut) { throw "Reading the JetKVM app log timed out." }
@@ -5519,7 +5537,7 @@ Status log
         try {
             $target = & $getJetKvmSshTarget
             & $setBusy $true "Reading crash logs..."
-            $command = Get-JetKvmCrashLogsCommand
+            $command = ConvertTo-JetKvmEncodedShellCommand -Script (Get-JetKvmCrashLogsCommand)
             $result = Invoke-JetKvmSshCommand -JetKvmAddress $target.Ip -KeyPath $target.KeyPath -Command $command -TimeoutSeconds 75
             & $writeSshOutput $result
             if ($result.TimedOut) { throw "Reading the JetKVM crash logs timed out." }
