@@ -1062,7 +1062,13 @@ function Invoke-JetKvmSshCommand {
         "__JETFUEL_EXIT_CODE:$LASTEXITCODE"
     } -ArgumentList $ssh, $sshArgs
 
-    if (-not (Wait-Job -Job $job -Timeout $TimeoutSeconds)) {
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    while ($job.State -in @("NotStarted", "Running") -and [DateTime]::UtcNow -lt $deadline) {
+        [Windows.Forms.Application]::DoEvents()
+        Start-Sleep -Milliseconds 100
+    }
+
+    if ($job.State -in @("NotStarted", "Running")) {
         $partial = Receive-Job -Job $job -ErrorAction SilentlyContinue
         Stop-Job -Job $job -ErrorAction SilentlyContinue
         Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
@@ -1097,6 +1103,194 @@ function Invoke-JetKvmSshCommand {
 function ConvertTo-ShellSingleQuoted {
     param([AllowEmptyString()][string]$Value)
     return "'" + $Value.Replace("'", "'\''") + "'"
+}
+
+function Get-JetKvmQuickDiagnosticsCommand {
+    return @'
+section() {
+  printf '\n=== %s ===\n' "$1"
+}
+
+run_with_timeout() {
+  seconds="$1"
+  shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$seconds" "$@"
+  else
+    "$@"
+  fi
+}
+
+section "VERSION"
+if command -v wget >/dev/null 2>&1; then
+  wget -qO- http://127.0.0.1/metrics 2>/dev/null | grep '^jetkvm_build_info' || true
+fi
+printf 'System version: '
+cat /version 2>/dev/null || echo unknown
+printf 'Hardware SKU: '
+cat /etc/jetkvm-sku 2>/dev/null || echo jetkvm-v2
+uname -a 2>/dev/null || true
+
+section "UPTIME AND LOAD"
+uptime 2>&1 || true
+cat /proc/loadavg 2>/dev/null || true
+
+section "MEMORY"
+if command -v free >/dev/null 2>&1; then
+  free -m 2>&1 || true
+else
+  sed -n '1,12p' /proc/meminfo 2>/dev/null || true
+fi
+
+section "D-STATE PROCESSES"
+dstate_found=0
+for p in /proc/[0-9]*; do
+  state="$(awk '/^State:/{print $2}' "$p/status" 2>/dev/null)"
+  if [ "$state" = "D" ]; then
+    printf '%-7s %-24s %s\n' "${p##*/}" "$(cat "$p/comm" 2>/dev/null)" "$state"
+    dstate_found=1
+  fi
+done
+if [ "$dstate_found" -eq 0 ]; then echo '[OK] no D-state processes found'; fi
+
+section "IMPORTANT PROCESSES"
+ps 2>&1 | grep -E 'jetkvm|tailscale|venc|vpss|vps|rga|valloc|sys|vlog' | grep -v grep || true
+
+section "NETWORK"
+if command -v ip >/dev/null 2>&1; then
+  ip -brief addr 2>&1 || ip addr 2>&1 || true
+  ip route 2>&1 || true
+else
+  ifconfig 2>&1 || true
+  route -n 2>&1 || true
+fi
+cat /etc/resolv.conf 2>/dev/null || true
+
+section "STORAGE"
+df -h 2>&1 || true
+
+section "TAILSCALE"
+if command -v tailscale >/dev/null 2>&1; then
+  run_with_timeout 10 tailscale status 2>&1 || true
+  tailscale ip -4 2>&1 || true
+  tailscale version 2>&1 || true
+else
+  echo '[INFO] tailscale command is not installed'
+fi
+
+section "TAILSCALE PERSISTENCE"
+if [ -f /userdata/init.d/S22tailscale ]; then
+  echo '[OK] boot hook exists'
+  if grep -q 'watchdog' /userdata/init.d/S22tailscale; then echo '[OK] watchdog configured'; else echo '[WARN] watchdog not configured'; fi
+else
+  echo '[WARN] boot hook is missing'
+fi
+if [ -f /var/run/tailscale/jetfuel-watchdog.pid ]; then
+  watchdog_pid="$(cat /var/run/tailscale/jetfuel-watchdog.pid 2>/dev/null || true)"
+  if [ -n "$watchdog_pid" ] && ps | grep -q "^[[:space:]]*$watchdog_pid[[:space:]]"; then
+    echo "[OK] watchdog process running (PID $watchdog_pid)"
+  else
+    echo '[WARN] watchdog PID file exists but process was not found'
+  fi
+else
+  echo '[WARN] watchdog PID file is missing'
+fi
+tail -n 40 /tmp/tailscale-init.log 2>/dev/null || true
+
+section "RECENT KERNEL MESSAGES"
+dmesg 2>&1 | tail -n 80 || true
+
+echo
+echo '[OK] quick diagnostics complete'
+'@
+}
+
+function Get-JetKvmFullDiagnosticsCommand {
+    $quick = Get-JetKvmQuickDiagnosticsCommand
+    $detail = @'
+
+section "ALL PROCESSES"
+ps 2>&1 || true
+
+section "JETKVM APPLICATION LOG"
+if [ -f /userdata/jetkvm/last.log ]; then
+  tail -n 600 /userdata/jetkvm/last.log 2>&1 || true
+else
+  echo '[WARN] /userdata/jetkvm/last.log was not found'
+fi
+
+section "JETKVM CRASH DUMPS"
+if [ -d /userdata/jetkvm/crashdump ]; then
+  ls -lah /userdata/jetkvm/crashdump 2>&1 || true
+  for crash_file in /userdata/jetkvm/crashdump/*.log; do
+    [ -f "$crash_file" ] || continue
+    echo "--- $crash_file (last 250 lines) ---"
+    tail -n 250 "$crash_file" 2>&1 || true
+  done
+else
+  echo '[OK] no crashdump directory exists'
+fi
+
+section "VIDEO AND USB STATE"
+for state_file in /sys/class/drm/*/status; do
+  [ -f "$state_file" ] || continue
+  printf '%s: ' "$state_file"
+  cat "$state_file" 2>/dev/null || true
+done
+cat /proc/bus/input/devices 2>/dev/null || true
+if command -v lsusb >/dev/null 2>&1; then lsusb 2>&1 || true; fi
+
+section "THERMAL STATE"
+for thermal_file in /sys/class/thermal/thermal_zone*/temp; do
+  [ -f "$thermal_file" ] || continue
+  printf '%s: ' "$thermal_file"
+  cat "$thermal_file" 2>/dev/null || true
+done
+
+section "PERSISTENT FILE INVENTORY"
+ls -lah /userdata/jetkvm 2>&1 || true
+ls -lah /userdata/init.d 2>&1 || true
+ls -lah /userdata/tailscale 2>&1 || true
+
+section "FULL KERNEL LOG"
+dmesg 2>&1 || true
+
+echo
+echo '[OK] full diagnostic report complete'
+'@
+    return ($quick + $detail)
+}
+
+function Get-JetKvmManualAppUpdateCommand {
+    return @'
+echo '=== JetKVM manual app update ==='
+JETKVM_SKU="$(cat /etc/jetkvm-sku 2>/dev/null || printf jetkvm-v2)"
+echo "Hardware SKU: $JETKVM_SKU"
+set -- $(wget -qO - "https://api.jetkvm.com/releases?deviceId=manual-update&sku=$JETKVM_SKU&appVersion=%3E%3D0.0.0" | sed -n 's/.*"appUrl":"\([^"]*\)".*"appHash":"\([^"]*\)".*/\1 \2/p')
+if [ "$#" -ne 2 ]; then
+  echo 'ERROR: release API did not return an app URL and SHA-256 hash'
+  exit 1
+fi
+app_url="$1"
+app_hash="$2"
+tmp_file="$(mktemp)" || exit 1
+echo "Downloading compatible app release from $app_url"
+if ! wget "$app_url" -O "$tmp_file"; then
+  rm -f "$tmp_file"
+  echo 'ERROR: app download failed'
+  exit 1
+fi
+if ! printf '%s  %s\n' "$app_hash" "$tmp_file" | sha256sum -c -; then
+  rm -f "$tmp_file"
+  echo 'ERROR: downloaded app failed SHA-256 verification'
+  exit 1
+fi
+chmod +x "$tmp_file" || exit 1
+mv "$tmp_file" /userdata/jetkvm/jetkvm_app.update || exit 1
+sync
+echo '[OK] verified app update staged; JetKVM is rebooting'
+( sleep 2; reboot ) >/dev/null 2>&1 &
+'@
 }
 
 function Get-MacIdentityProfiles {
@@ -3511,9 +3705,9 @@ function Start-JetFuelGuiV2 {
     $navPanel = [Windows.Forms.TableLayoutPanel]::new()
     $navPanel.Dock = "Fill"
     $navPanel.BackColor = $ui.Window
-    $navPanel.ColumnCount = 7
+    $navPanel.ColumnCount = 8
     $navPanel.RowCount = 1
-    foreach ($width in @(122, 122, 122, 150, 122, 122)) {
+    foreach ($width in @(100, 100, 100, 112, 132, 100, 100)) {
         $navPanel.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, (S $width))) | Out-Null
     }
     $navPanel.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
@@ -3530,6 +3724,10 @@ function Start-JetFuelGuiV2 {
     $identityTabButton.Text = "Identity"
     $identityTabButton.Dock = "Fill"
     $identityTabButton.Margin = New-ScaledPadding 0 0 4 0
+    $diagnosticsTabButton = [Windows.Forms.Button]::new()
+    $diagnosticsTabButton.Text = "Diagnostics"
+    $diagnosticsTabButton.Dock = "Fill"
+    $diagnosticsTabButton.Margin = New-ScaledPadding 0 0 4 0
     $biosTabButton = [Windows.Forms.Button]::new()
     $biosTabButton.Text = "BIOS - WARNING"
     $biosTabButton.Dock = "Fill"
@@ -3545,15 +3743,17 @@ function Start-JetFuelGuiV2 {
     Set-ButtonStyle $setupTabButton "Primary"
     Set-ButtonStyle $tailscaleTabButton "Secondary"
     Set-ButtonStyle $identityTabButton "Secondary"
+    Set-ButtonStyle $diagnosticsTabButton "Secondary"
     Set-ButtonStyle $biosTabButton "Danger"
     Set-ButtonStyle $settingsTabButton "Secondary"
     Set-ButtonStyle $helpTabButton "Secondary"
     $navPanel.Controls.Add($setupTabButton, 0, 0)
     $navPanel.Controls.Add($tailscaleTabButton, 1, 0)
     $navPanel.Controls.Add($identityTabButton, 2, 0)
-    $navPanel.Controls.Add($biosTabButton, 3, 0)
-    $navPanel.Controls.Add($settingsTabButton, 4, 0)
-    $navPanel.Controls.Add($helpTabButton, 5, 0)
+    $navPanel.Controls.Add($diagnosticsTabButton, 3, 0)
+    $navPanel.Controls.Add($biosTabButton, 4, 0)
+    $navPanel.Controls.Add($settingsTabButton, 5, 0)
+    $navPanel.Controls.Add($helpTabButton, 6, 0)
 
     $pageHost = [Windows.Forms.Panel]::new()
     $pageHost.Dock = "Fill"
@@ -3570,6 +3770,10 @@ function Start-JetFuelGuiV2 {
     $identityPage.Dock = "Fill"
     $identityPage.BackColor = $ui.Window
     $identityPage.AutoScroll = $true
+    $diagnosticsPage = [Windows.Forms.Panel]::new()
+    $diagnosticsPage.Dock = "Fill"
+    $diagnosticsPage.BackColor = $ui.Window
+    $diagnosticsPage.AutoScroll = $true
     $biosPage = [Windows.Forms.Panel]::new()
     $biosPage.Dock = "Fill"
     $biosPage.BackColor = $ui.Window
@@ -3641,6 +3845,19 @@ function Start-JetFuelGuiV2 {
     $identityLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::AutoSize)) | Out-Null
     $identityLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::AutoSize)) | Out-Null
     $identityPage.Controls.Add($identityLayout)
+
+    $diagnosticsLayout = [Windows.Forms.TableLayoutPanel]::new()
+    $diagnosticsLayout.Dock = "Top"
+    $diagnosticsLayout.AutoSize = $true
+    $diagnosticsLayout.AutoSizeMode = [Windows.Forms.AutoSizeMode]::GrowAndShrink
+    $diagnosticsLayout.BackColor = $ui.Window
+    $diagnosticsLayout.ColumnCount = 1
+    $diagnosticsLayout.RowCount = 3
+    $diagnosticsLayout.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
+    for ($i = 0; $i -lt 3; $i++) {
+        $diagnosticsLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::AutoSize)) | Out-Null
+    }
+    $diagnosticsPage.Controls.Add($diagnosticsLayout)
 
     $biosLayout = [Windows.Forms.TableLayoutPanel]::new()
     $biosLayout.Dock = "Top"
@@ -3717,6 +3934,16 @@ Tailscale tab
 - Repair Tailscale recreates JetFUEL's robust boot hook and watchdog, waits for tailscaled to create its socket, then reruns tailscale up with the current auth key/hostname settings or opens the manual login URL when no auth key is used.
 - Remove Tailscale logs out where possible, stops Tailscale, removes /userdata/tailscale, and reboots the JetKVM.
 
+Diagnostics tab
+- Quick check collects versions, uptime/load, memory, D-state processes, important services, network, storage, Tailscale, watchdog state, and recent kernel messages.
+- Save full report adds the JetKVM application log, crash dumps, process list, HDMI/USB state, thermal readings, persistent-file inventory, and full kernel log. Reports can contain IP/MAC/device identifiers and log content; review them before sharing.
+- View app log reads /userdata/jetkvm/last.log. View crash logs reads /userdata/jetkvm/crashdump.
+- Reboot requests a normal Linux reboot. Force reboot uses reboot -f and should only be used when a normal reboot does not recover the device.
+- A true electrical power cycle cannot be performed by software running on the JetKVM after its own power is removed. Use switched USB/PoE power or an external smart plug.
+- Open OTA settings uses the JetKVM web UI, which is the normal update path.
+- Manual app update is an advanced fallback using JetKVM's official release API and SHA-256 verification; it bypasses staged rollout and updates the app component only.
+- DriverAssistant and SocToolKit are Rockchip DFU recovery tools, not normal Windows device drivers. Recovery flashing can erase/reset the JetKVM and requires physical DFU mode.
+
 Identity tab
 - Network MAC identity lets you read the active JetKVM MAC, write a generated/custom user override, or clear the user override.
 - MAC profile choices are local-administered generated addresses. They are labels for organization; JetFUEL does not clone this PC MAC and does not use real third-party vendor OUIs by default.
@@ -3780,18 +4007,20 @@ Status log
 "@
     $helpPage.Controls.Add($helpBox)
 
-    $pageHost.Controls.AddRange(@($helpPage, $settingsPage, $biosPage, $identityPage, $tailscalePage, $setupPage))
+    $pageHost.Controls.AddRange(@($helpPage, $settingsPage, $biosPage, $diagnosticsPage, $identityPage, $tailscalePage, $setupPage))
     $showPage = {
         param([string]$Name)
         $setupPage.Visible = ($Name -eq "Setup")
         $tailscalePage.Visible = ($Name -eq "Tailscale")
         $identityPage.Visible = ($Name -eq "Identity")
+        $diagnosticsPage.Visible = ($Name -eq "Diagnostics")
         $biosPage.Visible = ($Name -eq "BIOS")
         $settingsPage.Visible = ($Name -eq "Settings")
         $helpPage.Visible = ($Name -eq "Help")
         Set-ButtonStyle $setupTabButton $(if ($Name -eq "Setup") { "Primary" } else { "Secondary" })
         Set-ButtonStyle $tailscaleTabButton $(if ($Name -eq "Tailscale") { "Primary" } else { "Secondary" })
         Set-ButtonStyle $identityTabButton $(if ($Name -eq "Identity") { "Primary" } else { "Secondary" })
+        Set-ButtonStyle $diagnosticsTabButton $(if ($Name -eq "Diagnostics") { "Primary" } else { "Secondary" })
         Set-ButtonStyle $biosTabButton "Danger"
         Set-ButtonStyle $settingsTabButton $(if ($Name -eq "Settings") { "Primary" } else { "Secondary" })
         Set-ButtonStyle $helpTabButton $(if ($Name -eq "Help") { "Primary" } else { "Secondary" })
@@ -3799,6 +4028,7 @@ Status log
     $setupTabButton.Add_Click({ & $showPage "Setup" })
     $tailscaleTabButton.Add_Click({ & $showPage "Tailscale" })
     $identityTabButton.Add_Click({ & $showPage "Identity" })
+    $diagnosticsTabButton.Add_Click({ & $showPage "Diagnostics" })
     $biosTabButton.Add_Click({ & $showPage "BIOS" })
     $settingsTabButton.Add_Click({ & $showPage "Settings" })
     $helpTabButton.Add_Click({ & $showPage "Help" })
@@ -4050,6 +4280,127 @@ Status log
     $tailscaleHelp.Text = "Check Tailscale prints status, routes, DNS, version, running processes, and whether the JetFUEL watchdog is installed/running.`r`nRepair Tailscale recreates JetFUEL's robust boot hook and watchdog, waits for the tailscaled socket, then runs tailscale up using the current auth-key/hostname fields or opens a browser login URL when no auth key is used.`r`nRemove Tailscale logs out where possible, stops Tailscale, removes /userdata/tailscale, and reboots the JetKVM."
     $tailscaleHelpGroup.Controls.Add($tailscaleHelp)
     $tailscaleLayout.Controls.Add($tailscaleHelpGroup, 0, 1)
+
+    $newDiagnosticsButton = {
+        param([string]$Text, [string]$Kind = "Secondary", [int]$Width = 142)
+        $button = [Windows.Forms.Button]::new()
+        $button.Text = $Text
+        $button.Size = [Drawing.Size]::new((S $Width), (S 34))
+        $button.Margin = New-ScaledPadding 0 2 8 4
+        Set-ButtonStyle $button $Kind
+        return $button
+    }
+
+    $diagnosticsGroup = New-Group "JetKVM health and debug files"
+    & $makeGroupAutoHeight $diagnosticsGroup
+    $diagnosticsGrid = [Windows.Forms.TableLayoutPanel]::new()
+    $diagnosticsGrid.Dock = "Top"
+    $diagnosticsGrid.AutoSize = $true
+    $diagnosticsGrid.AutoSizeMode = [Windows.Forms.AutoSizeMode]::GrowAndShrink
+    $diagnosticsGrid.ColumnCount = 1
+    $diagnosticsGrid.RowCount = 3
+    $diagnosticsGrid.Padding = New-ScaledPadding 8 8 8 4
+    $diagnosticsGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
+    for ($i = 0; $i -lt 3; $i++) {
+        $diagnosticsGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::AutoSize)) | Out-Null
+    }
+    $diagnosticsIntro = New-RowLabel "Runs read-only checks over Developer Mode SSH using the Setup tab IP and key. Quick check covers health; a full report also includes JetKVM logs and crash dumps."
+    $diagnosticsPrivacy = New-RowLabel "Diagnostic reports may contain LAN/Tailscale IPs, MAC addresses, device identifiers, and application log content. Review before sharing."
+    $diagnosticsPrivacy.ForeColor = $ui.Warn
+    $diagnosticsActions = [Windows.Forms.FlowLayoutPanel]::new()
+    $diagnosticsActions.Dock = "Top"
+    $diagnosticsActions.AutoSize = $true
+    $diagnosticsActions.AutoSizeMode = [Windows.Forms.AutoSizeMode]::GrowAndShrink
+    $diagnosticsActions.WrapContents = $true
+    $quickDiagnosticsButton = & $newDiagnosticsButton "Quick check" "Primary"
+    $saveDiagnosticsButton = & $newDiagnosticsButton "Save full report"
+    $viewAppLogButton = & $newDiagnosticsButton "View app log"
+    $viewCrashLogsButton = & $newDiagnosticsButton "View crash logs"
+    $diagnosticsActions.Controls.AddRange(@($quickDiagnosticsButton, $saveDiagnosticsButton, $viewAppLogButton, $viewCrashLogsButton))
+    $diagnosticsGrid.Controls.Add($diagnosticsIntro, 0, 0)
+    $diagnosticsGrid.Controls.Add($diagnosticsPrivacy, 0, 1)
+    $diagnosticsGrid.Controls.Add($diagnosticsActions, 0, 2)
+    $diagnosticsGroup.Controls.Add($diagnosticsGrid)
+    $diagnosticsLayout.Controls.Add($diagnosticsGroup, 0, 0)
+
+    $restartGroup = New-Group "Restart and power recovery"
+    & $makeGroupAutoHeight $restartGroup
+    $restartGrid = [Windows.Forms.TableLayoutPanel]::new()
+    $restartGrid.Dock = "Top"
+    $restartGrid.AutoSize = $true
+    $restartGrid.AutoSizeMode = [Windows.Forms.AutoSizeMode]::GrowAndShrink
+    $restartGrid.ColumnCount = 1
+    $restartGrid.RowCount = 2
+    $restartGrid.Padding = New-ScaledPadding 8 8 8 4
+    $restartGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
+    for ($i = 0; $i -lt 2; $i++) {
+        $restartGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::AutoSize)) | Out-Null
+    }
+    $restartIntro = New-RowLabel "Normal reboot is preferred. Force reboot skips the orderly shutdown path. A true electrical power cycle needs external switched USB/PoE power or a smart plug because the JetKVM cannot restore its own power after it is removed."
+    $restartActions = [Windows.Forms.FlowLayoutPanel]::new()
+    $restartActions.Dock = "Top"
+    $restartActions.AutoSize = $true
+    $restartActions.AutoSizeMode = [Windows.Forms.AutoSizeMode]::GrowAndShrink
+    $restartActions.WrapContents = $true
+    $rebootJetKvmButton = & $newDiagnosticsButton "Reboot JetKVM" "Secondary"
+    $forceRebootJetKvmButton = & $newDiagnosticsButton "Force reboot" "Danger"
+    $powerCycleHelpButton = & $newDiagnosticsButton "Power-cycle help" "Secondary"
+    $restartActions.Controls.AddRange(@($rebootJetKvmButton, $forceRebootJetKvmButton, $powerCycleHelpButton))
+    $restartGrid.Controls.Add($restartIntro, 0, 0)
+    $restartGrid.Controls.Add($restartActions, 0, 1)
+    $restartGroup.Controls.Add($restartGrid)
+    $diagnosticsLayout.Controls.Add($restartGroup, 0, 1)
+
+    $recoveryGroup = New-Group "Updates and DFU recovery"
+    & $makeGroupAutoHeight $recoveryGroup
+    $recoveryGrid = [Windows.Forms.TableLayoutPanel]::new()
+    $recoveryGrid.Dock = "Top"
+    $recoveryGrid.AutoSize = $true
+    $recoveryGrid.AutoSizeMode = [Windows.Forms.AutoSizeMode]::GrowAndShrink
+    $recoveryGrid.ColumnCount = 1
+    $recoveryGrid.RowCount = 3
+    $recoveryGrid.Padding = New-ScaledPadding 8 8 8 4
+    $recoveryGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
+    for ($i = 0; $i -lt 3; $i++) {
+        $recoveryGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::AutoSize)) | Out-Null
+    }
+    $updateIntro = New-RowLabel "Use JetKVM Settings > General > Check for Updates for normal OTA updates. Manual app update is a checksum-verified fallback that bypasses staged rollout and updates only the JetKVM app."
+    $recoveryWarning = New-RowLabel "DFU recovery is destructive and requires physical access. DriverAssistant is the Rockchip recovery driver; SocToolKit flashes the official recovery image while the JetKVM is in Maskrom/DFU mode."
+    $recoveryWarning.ForeColor = $ui.Warn
+    $recoveryActions = [Windows.Forms.FlowLayoutPanel]::new()
+    $recoveryActions.Dock = "Top"
+    $recoveryActions.AutoSize = $true
+    $recoveryActions.AutoSizeMode = [Windows.Forms.AutoSizeMode]::GrowAndShrink
+    $recoveryActions.WrapContents = $true
+    $openOtaButton = & $newDiagnosticsButton "Open OTA settings"
+    $manualAppUpdateButton = & $newDiagnosticsButton "Manual app update" "Danger"
+    $driverAssistantButton = & $newDiagnosticsButton "DriverAssistant"
+    $socToolkitButton = & $newDiagnosticsButton "SocToolKit"
+    $recoveryImageButton = & $newDiagnosticsButton "Recovery image" "Danger"
+    $recoveryGuideButton = & $newDiagnosticsButton "Recovery guide"
+    $recoveryActions.Controls.AddRange(@($openOtaButton, $manualAppUpdateButton, $driverAssistantButton, $socToolkitButton, $recoveryImageButton, $recoveryGuideButton))
+    $recoveryGrid.Controls.Add($updateIntro, 0, 0)
+    $recoveryGrid.Controls.Add($recoveryWarning, 0, 1)
+    $recoveryGrid.Controls.Add($recoveryActions, 0, 2)
+    $recoveryGroup.Controls.Add($recoveryGrid)
+    $diagnosticsLayout.Controls.Add($recoveryGroup, 0, 2)
+
+    $diagnosticTextLabels = @($diagnosticsIntro, $diagnosticsPrivacy, $restartIntro, $updateIntro, $recoveryWarning)
+    foreach ($diagnosticTextLabel in $diagnosticTextLabels) {
+        $diagnosticTextLabel.AutoSize = $true
+        $diagnosticTextLabel.Dock = "Top"
+        $diagnosticTextLabel.TextAlign = "TopLeft"
+        $diagnosticTextLabel.Padding = New-ScaledPadding 0 4 0 6
+    }
+    $resizeDiagnosticText = {
+        $wrapWidth = [Math]::Max((S 360), $diagnosticsPage.ClientSize.Width - (S 52))
+        foreach ($diagnosticTextLabel in $diagnosticTextLabels) {
+            $diagnosticTextLabel.MaximumSize = [Drawing.Size]::new($wrapWidth, 0)
+        }
+    }
+    $diagnosticsPage.Add_SizeChanged({ & $resizeDiagnosticText })
+    $diagnosticsPage.Add_VisibleChanged({ if ($diagnosticsPage.Visible) { & $resizeDiagnosticText } })
+    & $resizeDiagnosticText
 
     $macGroup = New-Group "Network MAC identity"
     & $makeGroupAutoHeight $macGroup
@@ -4693,6 +5044,14 @@ Status log
         $applyDeviceSettingsButton.Enabled = -not $Busy
         $scanBiosButton.Enabled = -not $Busy
         $applyBiosButton.Enabled = (-not $Busy) -and $biosState.Scan -and $biosState.Scan.VendorInfo.Supported -and $biosState.Scan.Targets -and ($biosState.Scan.Targets.ApplyRows.Count -gt 0)
+        foreach ($diagnosticButton in @(
+            $quickDiagnosticsButton, $saveDiagnosticsButton, $viewAppLogButton, $viewCrashLogsButton,
+            $rebootJetKvmButton, $forceRebootJetKvmButton, $powerCycleHelpButton,
+            $openOtaButton, $manualAppUpdateButton, $driverAssistantButton, $socToolkitButton,
+            $recoveryImageButton, $recoveryGuideButton
+        )) {
+            $diagnosticButton.Enabled = -not $Busy
+        }
         $exitButton.Enabled = -not $Busy
         $statusLabel.Text = $Status
         [Windows.Forms.Application]::DoEvents()
@@ -5026,6 +5385,251 @@ Status log
     }
     $openUiButton.Add_Click($openAction)
     $openUiButton2.Add_Click($openAction)
+
+    $getJetKvmSshTarget = {
+        $ip = $ipBox.Text.Trim()
+        $keyPath = $keyBox.Text.Trim()
+        Assert-ValidIpOrHost -Value $ip
+        if ([string]::IsNullOrWhiteSpace($keyPath)) {
+            throw "Choose the SSH private key path on the Setup tab first."
+        }
+        if (-not (Test-Path -LiteralPath $keyPath)) {
+            throw "SSH private key not found: $keyPath"
+        }
+        return [pscustomobject]@{ Ip = $ip; KeyPath = $keyPath }
+    }
+
+    $writeSshOutput = {
+        param($Result)
+        if ($Result.Output) {
+            $Result.Output -split "`n" | ForEach-Object { & $log $_ }
+        }
+    }
+
+    $openDiagnosticUrl = {
+        param([string]$Url, [string]$Description)
+        try {
+            Start-Process $Url
+            & $log $Description
+        } catch {
+            & $log ("ERROR: Could not open $Url - " + $_.Exception.Message)
+            [Windows.Forms.MessageBox]::Show("Could not open:`r`n$Url`r`n`r`n$($_.Exception.Message)", "JetFUEL diagnostics", "OK", "Error") | Out-Null
+        }
+    }
+
+    $quickDiagnosticsButton.Add_Click({
+        try {
+            $target = & $getJetKvmSshTarget
+            & $setBusy $true "Running diagnostics..."
+            & $log "--- JetKVM quick diagnostics ---"
+            $result = Invoke-JetKvmSshCommand -JetKvmAddress $target.Ip -KeyPath $target.KeyPath -Command (Get-JetKvmQuickDiagnosticsCommand) -TimeoutSeconds 75
+            & $writeSshOutput $result
+            if ($result.TimedOut) { throw "JetKVM quick diagnostics timed out after 75 seconds." }
+            if ($result.ExitCode -ne 0) { throw "JetKVM quick diagnostics failed with exit code $($result.ExitCode)." }
+            & $setBusy $false "Diagnostics complete"
+        } catch {
+            & $log ("ERROR: " + $_.Exception.Message)
+            & $setBusy $false "Failed"
+            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL diagnostics", "OK", "Error") | Out-Null
+        }
+    })
+
+    $saveDiagnosticsButton.Add_Click({
+        $dialog = $null
+        try {
+            $target = & $getJetKvmSshTarget
+            $safeTarget = $target.Ip -replace '[^A-Za-z0-9.-]', '_'
+            $dialog = [Windows.Forms.SaveFileDialog]::new()
+            $dialog.Title = "Save JetKVM diagnostic report"
+            $dialog.Filter = "Text report (*.txt)|*.txt|All files (*.*)|*.*"
+            $dialog.FileName = "JetKVM-diagnostics-$safeTarget-$(Get-Date -Format 'yyyyMMdd-HHmmss').txt"
+            if ($dialog.ShowDialog() -ne [Windows.Forms.DialogResult]::OK) {
+                & $log "Diagnostic report cancelled."
+                return
+            }
+            $reportPath = $dialog.FileName
+
+            & $setBusy $true "Collecting full report..."
+            & $log "--- Collecting full JetKVM diagnostic report ---"
+            $result = Invoke-JetKvmSshCommand -JetKvmAddress $target.Ip -KeyPath $target.KeyPath -Command (Get-JetKvmFullDiagnosticsCommand) -TimeoutSeconds 150
+            & $writeSshOutput $result
+
+            $header = @(
+                "JetFUEL JetKVM diagnostic report",
+                "Collected: $((Get-Date).ToString('o'))",
+                "JetKVM target: $($target.Ip)",
+                "Privacy notice: this report may contain IP/MAC addresses, device identifiers, and application log content.",
+                ""
+            ) -join [Environment]::NewLine
+            [IO.File]::WriteAllText($reportPath, ($header + $result.Output + [Environment]::NewLine), [Text.UTF8Encoding]::new($false))
+            & $log "Diagnostic report saved: $reportPath"
+
+            if ($result.TimedOut) { throw "The full report timed out after 150 seconds. Partial output was saved to $reportPath" }
+            if ($result.ExitCode -ne 0) { throw "The full report command exited with code $($result.ExitCode). Partial output was saved to $reportPath" }
+            & $setBusy $false "Report saved"
+            [Windows.Forms.MessageBox]::Show("Diagnostic report saved to:`r`n`r`n$reportPath`r`n`r`nReview it for identifying information before sharing.", "JetFUEL diagnostics", "OK", "Information") | Out-Null
+        } catch {
+            & $log ("ERROR: " + $_.Exception.Message)
+            & $setBusy $false "Failed"
+            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL diagnostics", "OK", "Error") | Out-Null
+        } finally {
+            if ($dialog) { $dialog.Dispose() }
+        }
+    })
+
+    $viewAppLogButton.Add_Click({
+        try {
+            $target = & $getJetKvmSshTarget
+            & $setBusy $true "Reading app log..."
+            $command = "echo '--- /userdata/jetkvm/last.log (last 500 lines) ---'; if [ -f /userdata/jetkvm/last.log ]; then tail -n 500 /userdata/jetkvm/last.log 2>&1; else echo '[WARN] JetKVM app log was not found'; fi"
+            $result = Invoke-JetKvmSshCommand -JetKvmAddress $target.Ip -KeyPath $target.KeyPath -Command $command -TimeoutSeconds 60
+            & $writeSshOutput $result
+            if ($result.TimedOut) { throw "Reading the JetKVM app log timed out." }
+            if ($result.ExitCode -ne 0) { throw "Reading the JetKVM app log failed with exit code $($result.ExitCode)." }
+            & $setBusy $false "App log loaded"
+        } catch {
+            & $log ("ERROR: " + $_.Exception.Message)
+            & $setBusy $false "Failed"
+            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL diagnostics", "OK", "Error") | Out-Null
+        }
+    })
+
+    $viewCrashLogsButton.Add_Click({
+        try {
+            $target = & $getJetKvmSshTarget
+            & $setBusy $true "Reading crash logs..."
+            $command = @'
+echo '--- JetKVM crash files ---'
+if [ -d /userdata/jetkvm/crashdump ]; then
+  ls -lah /userdata/jetkvm/crashdump 2>&1 || true
+  found=0
+  for crash_file in /userdata/jetkvm/crashdump/*.log /userdata/jetkvm/crashdump/*.txt; do
+    [ -f "$crash_file" ] || continue
+    found=1
+    echo "--- $crash_file (last 250 lines) ---"
+    tail -n 250 "$crash_file" 2>&1 || true
+  done
+  if [ "$found" -eq 0 ]; then echo '[INFO] no text crash logs found'; fi
+else
+  echo '[OK] no crashdump directory exists'
+fi
+'@
+            $result = Invoke-JetKvmSshCommand -JetKvmAddress $target.Ip -KeyPath $target.KeyPath -Command $command -TimeoutSeconds 75
+            & $writeSshOutput $result
+            if ($result.TimedOut) { throw "Reading the JetKVM crash logs timed out." }
+            if ($result.ExitCode -ne 0) { throw "Reading the JetKVM crash logs failed with exit code $($result.ExitCode)." }
+            & $setBusy $false "Crash logs loaded"
+        } catch {
+            & $log ("ERROR: " + $_.Exception.Message)
+            & $setBusy $false "Failed"
+            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL diagnostics", "OK", "Error") | Out-Null
+        }
+    })
+
+    $rebootJetKvmButton.Add_Click({
+        try {
+            $target = & $getJetKvmSshTarget
+            $answer = [Windows.Forms.MessageBox]::Show("Request a normal JetKVM reboot now?", "Reboot JetKVM", "YesNo", "Question")
+            if ($answer -ne [Windows.Forms.DialogResult]::Yes) { return }
+            & $setBusy $true "Requesting reboot..."
+            $result = Invoke-JetKvmSshCommand -JetKvmAddress $target.Ip -KeyPath $target.KeyPath -Command "sync; echo '[OK] normal reboot requested'; ( sleep 1; reboot ) >/dev/null 2>&1 &" -TimeoutSeconds 8
+            & $writeSshOutput $result
+            if ($result.Output -notmatch '\[OK\] normal reboot requested') {
+                throw "JetKVM did not acknowledge the reboot request. Check SSH access and the diagnostic log."
+            }
+            & $log "Reboot command sent. SSH and the web UI will be unavailable while JetKVM restarts."
+            & $setBusy $false "JetKVM rebooting"
+        } catch {
+            & $log ("ERROR: " + $_.Exception.Message)
+            & $setBusy $false "Failed"
+            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL diagnostics", "OK", "Error") | Out-Null
+        }
+    })
+
+    $forceRebootJetKvmButton.Add_Click({
+        try {
+            $target = & $getJetKvmSshTarget
+            $answer = [Windows.Forms.MessageBox]::Show("Force reboot skips the normal orderly shutdown path and can risk filesystem damage.`r`n`r`nUse it only when a normal reboot does not work. It is NOT an electrical power cycle.`r`n`r`nContinue?", "Force reboot JetKVM", "YesNo", "Warning")
+            if ($answer -ne [Windows.Forms.DialogResult]::Yes) { return }
+            & $setBusy $true "Requesting force reboot..."
+            $result = Invoke-JetKvmSshCommand -JetKvmAddress $target.Ip -KeyPath $target.KeyPath -Command "sync; echo '[WARN] force reboot requested'; ( sleep 1; reboot -f ) >/dev/null 2>&1 &" -TimeoutSeconds 8
+            & $writeSshOutput $result
+            if ($result.Output -notmatch '\[WARN\] force reboot requested') {
+                throw "JetKVM did not acknowledge the force-reboot request. Check SSH access and the diagnostic log."
+            }
+            & $log "Force reboot command sent. SSH and the web UI will be unavailable while JetKVM restarts."
+            & $setBusy $false "JetKVM force rebooting"
+        } catch {
+            & $log ("ERROR: " + $_.Exception.Message)
+            & $setBusy $false "Failed"
+            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL diagnostics", "OK", "Error") | Out-Null
+        }
+    })
+
+    $powerCycleHelpButton.Add_Click({
+        [Windows.Forms.MessageBox]::Show(
+            "JetKVM cannot electrically power-cycle itself: after its input power is removed, its software cannot turn that power back on.`r`n`r`nFor a full power cycle, remove and restore USB power physically or use an independently controlled USB/PoE switch or smart plug.`r`n`r`nReboot and Force reboot only restart Linux; they do not remove electrical power.",
+            "Full JetKVM power cycle",
+            "OK",
+            "Information"
+        ) | Out-Null
+    })
+
+    $openOtaButton.Add_Click({
+        try {
+            Open-JetKvmUi -JetKvmAddress $ipBox.Text.Trim()
+            & $log "Opened JetKVM UI. Use Settings > General > Check for Updates for the normal OTA update path."
+            [Windows.Forms.MessageBox]::Show("In the JetKVM UI, open Settings > General and choose Check for Updates. This is the recommended way to update both supported components through the normal rollout.", "JetKVM OTA update", "OK", "Information") | Out-Null
+        } catch {
+            & $log ("ERROR: " + $_.Exception.Message)
+            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL diagnostics", "OK", "Error") | Out-Null
+        }
+    })
+
+    $manualAppUpdateButton.Add_Click({
+        try {
+            $target = & $getJetKvmSshTarget
+            $answer = [Windows.Forms.MessageBox]::Show(
+                "Use JetKVM's official OTA UI whenever possible.`r`n`r`nThis advanced fallback queries JetKVM's official release API for this hardware SKU, verifies the app SHA-256, stages only the app component, and reboots. It bypasses staged rollout and does not update the system image.`r`n`r`nContinue?",
+                "Manual JetKVM app update",
+                "YesNo",
+                "Warning"
+            )
+            if ($answer -ne [Windows.Forms.DialogResult]::Yes) { return }
+            & $setBusy $true "Updating JetKVM app..."
+            & $log "--- Manual JetKVM app update ---"
+            $result = Invoke-JetKvmSshCommand -JetKvmAddress $target.Ip -KeyPath $target.KeyPath -Command (Get-JetKvmManualAppUpdateCommand) -TimeoutSeconds 180
+            & $writeSshOutput $result
+            $staged = $result.Output -match '\[OK\] verified app update staged'
+            if (-not $staged) {
+                if ($result.TimedOut) { throw "Manual app update timed out before JetFUEL saw the verified staging confirmation." }
+                throw "Manual app update failed with exit code $($result.ExitCode). Check the diagnostic log before retrying."
+            }
+            & $log "Verified app update was staged. JetKVM is rebooting."
+            & $setBusy $false "JetKVM updating"
+        } catch {
+            & $log ("ERROR: " + $_.Exception.Message)
+            & $setBusy $false "Failed"
+            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL diagnostics", "OK", "Error") | Out-Null
+        }
+    })
+
+    $driverAssistantButton.Add_Click({
+        & $openDiagnosticUrl "https://github.com/jetkvm/rv1106-system/releases/download/v0.2.5/DriverAssitant_v5.14.zip" "Opened official JetKVM/Rockchip DriverAssistant v5.14 download. This is a DFU recovery USB driver, not a routine Windows driver update."
+    })
+    $socToolkitButton.Add_Click({
+        & $openDiagnosticUrl "https://github.com/jetkvm/rv1106-system/releases/download/v0.2.5/SocToolKit_v2.5_20250701_01_win.zip" "Opened official JetKVM/Rockchip SocToolKit v2.5 download for manual DFU recovery."
+    })
+    $recoveryImageButton.Add_Click({
+        $answer = [Windows.Forms.MessageBox]::Show("Open the latest official jetkvm-v2 system recovery image?`r`n`r`nDFU flashing can erase/reset the JetKVM. Confirm the hardware SKU and follow the official recovery guide before using this image.", "JetKVM recovery image", "YesNo", "Warning")
+        if ($answer -eq [Windows.Forms.DialogResult]::Yes) {
+            & $openDiagnosticUrl "https://api.jetkvm.com/releases/system_recovery/latest?sku=jetkvm-v2" "Opened official latest jetkvm-v2 recovery image endpoint."
+        }
+    })
+    $recoveryGuideButton.Add_Click({
+        & $openDiagnosticUrl "https://jetkvm.com/docs/advanced-usage/factory-reset-dfu" "Opened the official JetKVM factory reset / DFU recovery guide."
+    })
+
     $copyKeyButton.Add_Click({
         try {
             $keyPath = $keyBox.Text.Trim()
