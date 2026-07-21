@@ -3870,7 +3870,7 @@ function Start-JetFuelGuiV2 {
     for ($i = 0; $i -lt 3; $i++) {
         $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::AutoSize)) | Out-Null
     }
-    $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, (S 46))) | Out-Null
+    $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, (S 42))) | Out-Null
     $setupPage.Controls.Add($setupLayout)
 
     # Groups in the setup column grow to fit their grids instead of using fixed
@@ -3883,13 +3883,15 @@ function Start-JetFuelGuiV2 {
     }
 
     $tailscaleLayout = [Windows.Forms.TableLayoutPanel]::new()
-    $tailscaleLayout.Dock = "Fill"
+    $tailscaleLayout.Dock = "Top"
+    $tailscaleLayout.AutoSize = $true
+    $tailscaleLayout.AutoSizeMode = [Windows.Forms.AutoSizeMode]::GrowAndShrink
     $tailscaleLayout.BackColor = $ui.Window
     $tailscaleLayout.ColumnCount = 1
     $tailscaleLayout.RowCount = 2
     $tailscaleLayout.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
     $tailscaleLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, (S 76))) | Out-Null
-    $tailscaleLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
+    $tailscaleLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::AutoSize)) | Out-Null
     $tailscalePage.Controls.Add($tailscaleLayout)
 
     $settingsLayout = [Windows.Forms.TableLayoutPanel]::new()
@@ -4120,20 +4122,22 @@ Status log
     $deploymentColumns.AutoSizeMode = [Windows.Forms.AutoSizeMode]::GrowAndShrink
     $deploymentColumns.ColumnCount = 2
     $deploymentColumns.RowCount = 1
-    $deploymentColumns.Padding = New-ScaledPadding 4 8 4 3
+    $deploymentColumns.Padding = New-ScaledPadding 4 4 4 1
     $deploymentColumns.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 50)) | Out-Null
     $deploymentColumns.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 50)) | Out-Null
     $deploymentGroup.Controls.Add($deploymentColumns)
 
     $connectionGrid = New-StepGrid 4
-    $connectionGrid.Dock = "Fill"
+    # Keep the shorter SSH grid pinned to the top instead of stretching its
+    # final row to match the taller Tailscale grid beside it.
+    $connectionGrid.Dock = "Top"
     $connectionGrid.Padding = New-ScaledPadding 0 0 8 0
     $connectionGrid.ColumnStyles.Clear()
     $connectionGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, (S 122))) | Out-Null
     $connectionGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
-    $connectionGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, (S 108))) | Out-Null
+    $connectionGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, (S 124))) | Out-Null
     $connectionGrid.RowStyles.Clear()
-    foreach ($height in @(29, 29, 27, 29)) {
+    foreach ($height in @(27, 27, 25, 27)) {
         $connectionGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, (S $height))) | Out-Null
     }
     $ipBox = New-Field ""
@@ -4156,7 +4160,7 @@ Status log
     $createKeyCheck.AutoEllipsis = $true
     Set-CheckStyle $createKeyCheck
     $noPassCheck = [Windows.Forms.CheckBox]::new()
-    $noPassCheck.Text = "None"
+    $noPassCheck.Text = "No passphrase"
     $noPassCheck.Checked = $true
     $noPassCheck.Dock = "Fill"
     $noPassCheck.AutoEllipsis = $true
@@ -4176,14 +4180,14 @@ Status log
     $deploymentColumns.Controls.Add($connectionGrid, 0, 0)
 
     $tailscaleGrid = New-StepGrid 5
-    $tailscaleGrid.Dock = "Fill"
+    $tailscaleGrid.Dock = "Top"
     $tailscaleGrid.Padding = New-ScaledPadding 8 0 0 0
     $tailscaleGrid.ColumnStyles.Clear()
     $tailscaleGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, (S 120))) | Out-Null
     $tailscaleGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
     $tailscaleGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, (S 4))) | Out-Null
     $tailscaleGrid.RowStyles.Clear()
-    foreach ($height in @(29, 27, 29, 29, 29)) {
+    foreach ($height in @(27, 25, 27, 27, 27)) {
         $tailscaleGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, (S $height))) | Out-Null
     }
     $installerSourceBox = [Windows.Forms.ComboBox]::new()
@@ -4255,7 +4259,7 @@ Status log
     }
     $preGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, (S 132))) | Out-Null
     $preGrid.RowStyles.Clear()
-    foreach ($height in @(24, 24)) {
+    foreach ($height in @(22, 22)) {
         $preGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, (S $height))) | Out-Null
     }
     $precheckGroup.Controls.Add($preGrid)
@@ -4289,7 +4293,7 @@ Status log
     $manualSteps.ForeColor = [Drawing.Color]::FromArgb(253, 230, 138)
     $manualGrid = New-StepGrid 2
     $manualGrid.RowStyles.Clear()
-    foreach ($height in @(24, 24)) {
+    foreach ($height in @(22, 22)) {
         $manualGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, (S $height))) | Out-Null
     }
     $manualSteps.Controls.Add($manualGrid)
@@ -4337,7 +4341,7 @@ Status log
     $runButton = [Windows.Forms.Button]::new()
     $runButton.Text = "4 - Install Tailscale"
     $runButton.Dock = "Fill"
-    $runButton.Margin = New-ScaledPadding 8 4 0 4
+    $runButton.Margin = New-ScaledPadding 8 3 0 3
     Set-ButtonStyle $runButton "Primary"
     $setupActionPanel.Controls.Add($statusLabel, 0, 0)
     $setupActionPanel.Controls.Add($runButton, 1, 0)
@@ -4381,13 +4385,22 @@ Status log
     $tailscaleLayout.Controls.Add($actionPanel, 0, 0)
 
     $tailscaleHelpGroup = New-Group "What these tools do"
+    & $makeGroupAutoHeight $tailscaleHelpGroup
     $tailscaleHelp = [Windows.Forms.Label]::new()
-    $tailscaleHelp.Dock = "Fill"
+    $tailscaleHelp.Dock = "Top"
+    $tailscaleHelp.AutoSize = $true
+    $tailscaleHelp.Padding = New-ScaledPadding 4 8 4 8
     $tailscaleHelp.ForeColor = $ui.Muted
     $tailscaleHelp.Font = [Drawing.Font]::new("Segoe UI", 9)
-    $tailscaleHelp.Text = "Check Tailscale prints status, routes, DNS, version, running processes, and whether the JetFUEL watchdog is installed/running.`r`nRepair Tailscale recreates JetFUEL's robust boot hook and watchdog, waits for the tailscaled socket, then runs tailscale up using the current auth-key/hostname fields or opens a browser login URL when no auth key is used. The watchdog also restarts tailscaled after three consecutive timed-out health probes.`r`nRemove Tailscale logs out where possible, stops Tailscale, removes /userdata/tailscale, and reboots the JetKVM."
+    $tailscaleHelp.Text = "Check prints service, network, version, and watchdog health. Repair rebuilds the boot hook/watchdog and reconnects using the Setup details. Remove logs out, deletes Tailscale state, and reboots the JetKVM.`r`nRepair also restarts tailscaled after repeated LocalAPI health timeouts; without an auth key it opens the browser login flow."
     $tailscaleHelpGroup.Controls.Add($tailscaleHelp)
     $tailscaleLayout.Controls.Add($tailscaleHelpGroup, 0, 1)
+    $resizeTailscaleHelp = {
+        $tailscaleHelp.MaximumSize = [Drawing.Size]::new([Math]::Max((S 360), $tailscalePage.ClientSize.Width - (S 52)), 0)
+    }
+    $tailscalePage.Add_SizeChanged({ & $resizeTailscaleHelp })
+    $tailscalePage.Add_VisibleChanged({ if ($tailscalePage.Visible) { & $resizeTailscaleHelp } })
+    & $resizeTailscaleHelp
 
     $newDiagnosticsButton = {
         param([string]$Text, [string]$Kind = "Secondary", [int]$Width = 142)
@@ -4407,13 +4420,13 @@ Status log
     $diagnosticsGrid.AutoSizeMode = [Windows.Forms.AutoSizeMode]::GrowAndShrink
     $diagnosticsGrid.ColumnCount = 1
     $diagnosticsGrid.RowCount = 3
-    $diagnosticsGrid.Padding = New-ScaledPadding 8 8 8 4
+    $diagnosticsGrid.Padding = New-ScaledPadding 8 4 8 2
     $diagnosticsGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
     for ($i = 0; $i -lt 3; $i++) {
         $diagnosticsGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::AutoSize)) | Out-Null
     }
-    $diagnosticsIntro = New-RowLabel "Runs read-only checks over Developer Mode SSH using the Setup tab IP and key. Quick check covers health; a full report also includes JetKVM logs and crash dumps."
-    $diagnosticsPrivacy = New-RowLabel "Diagnostic reports may contain LAN/Tailscale IPs, MAC addresses, device identifiers, and application log content. Review before sharing."
+    $diagnosticsIntro = New-RowLabel "Read-only SSH checks using the Setup address and key. Quick check covers health; full report adds logs and crash dumps."
+    $diagnosticsPrivacy = New-RowLabel "Reports may contain IPs, MAC addresses, identifiers, and application logs. Review before sharing."
     $diagnosticsPrivacy.ForeColor = $ui.Warn
     $diagnosticsActions = [Windows.Forms.FlowLayoutPanel]::new()
     $diagnosticsActions.Dock = "Top"
@@ -4439,12 +4452,12 @@ Status log
     $restartGrid.AutoSizeMode = [Windows.Forms.AutoSizeMode]::GrowAndShrink
     $restartGrid.ColumnCount = 1
     $restartGrid.RowCount = 2
-    $restartGrid.Padding = New-ScaledPadding 8 8 8 4
+    $restartGrid.Padding = New-ScaledPadding 8 4 8 2
     $restartGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
     for ($i = 0; $i -lt 2; $i++) {
         $restartGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::AutoSize)) | Out-Null
     }
-    $restartIntro = New-RowLabel "Normal reboot is preferred. Force reboot skips the orderly shutdown path. A true electrical power cycle needs external switched USB/PoE power or a smart plug because the JetKVM cannot restore its own power after it is removed."
+    $restartIntro = New-RowLabel "Use normal reboot first. Force reboot is a last resort. Electrical power cycling requires an external switched power source."
     $restartActions = [Windows.Forms.FlowLayoutPanel]::new()
     $restartActions.Dock = "Top"
     $restartActions.AutoSize = $true
@@ -4467,13 +4480,13 @@ Status log
     $recoveryGrid.AutoSizeMode = [Windows.Forms.AutoSizeMode]::GrowAndShrink
     $recoveryGrid.ColumnCount = 1
     $recoveryGrid.RowCount = 3
-    $recoveryGrid.Padding = New-ScaledPadding 8 8 8 4
+    $recoveryGrid.Padding = New-ScaledPadding 8 4 8 2
     $recoveryGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
     for ($i = 0; $i -lt 3; $i++) {
         $recoveryGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::AutoSize)) | Out-Null
     }
-    $updateIntro = New-RowLabel "Use JetKVM Settings > General > Check for Updates for normal OTA updates. Manual app update is a checksum-verified fallback that bypasses staged rollout and updates only the JetKVM app."
-    $recoveryWarning = New-RowLabel "DFU recovery is destructive and requires physical access. DriverAssistant is the Rockchip recovery driver; SocToolKit flashes the official recovery image while the JetKVM is in Maskrom/DFU mode."
+    $updateIntro = New-RowLabel "Use OTA settings for normal updates. Manual app update is an advanced, checksum-verified app-only fallback."
+    $recoveryWarning = New-RowLabel "DFU recovery is destructive and needs physical access. DriverAssistant installs recovery drivers; SocToolKit flashes the official image."
     $recoveryWarning.ForeColor = $ui.Warn
     $recoveryActions = [Windows.Forms.FlowLayoutPanel]::new()
     $recoveryActions.Dock = "Top"
@@ -4498,7 +4511,7 @@ Status log
         $diagnosticTextLabel.AutoSize = $true
         $diagnosticTextLabel.Dock = "Top"
         $diagnosticTextLabel.TextAlign = "TopLeft"
-        $diagnosticTextLabel.Padding = New-ScaledPadding 0 4 0 6
+        $diagnosticTextLabel.Padding = New-ScaledPadding 0 2 0 3
     }
     $resizeDiagnosticText = {
         $wrapWidth = [Math]::Max((S 360), $diagnosticsPage.ClientSize.Width - (S 52))
@@ -4514,7 +4527,7 @@ Status log
     & $makeGroupAutoHeight $macGroup
     $macGrid = New-StepGrid 7
     $macGrid.RowStyles.Clear()
-    foreach ($height in @(34, 30, 30, 30, 30, 34, 42)) {
+    foreach ($height in @(30, 28, 28, 28, 26, 30, 36)) {
         $macGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, (S $height))) | Out-Null
     }
     $macGroup.Controls.Add($macGrid)
@@ -4764,7 +4777,7 @@ Status log
     $biosWarningGroup.ForeColor = [Drawing.Color]::FromArgb(254, 202, 202)
     $biosWarningGrid = New-StepGrid 3
     $biosWarningGrid.RowStyles.Clear()
-    foreach ($height in @(44, 32, 28)) {
+    foreach ($height in @(38, 28, 26)) {
         $biosWarningGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, (S $height))) | Out-Null
     }
     $biosWarningGroup.Controls.Add($biosWarningGrid)
@@ -4790,7 +4803,7 @@ Status log
     & $makeGroupAutoHeight $biosDetectGroup
     $biosDetectGrid = New-StepGrid 7
     $biosDetectGrid.RowStyles.Clear()
-    foreach ($height in @(30, 30, 30, 30, 30, 30, 34)) {
+    foreach ($height in @(28, 28, 28, 28, 28, 28, 30)) {
         $biosDetectGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, (S $height))) | Out-Null
     }
     $biosDetectGroup.Controls.Add($biosDetectGrid)
@@ -4891,7 +4904,11 @@ Status log
 
     $settingsGroup = New-Group "Installer sources"
     & $makeGroupAutoHeight $settingsGroup
-    $settingsGrid = New-StepGrid 8
+    $settingsGrid = New-StepGrid 5
+    $settingsGrid.RowStyles.Clear()
+    foreach ($height in @(32, 28, 30, 30, 38)) {
+        $settingsGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, (S $height))) | Out-Null
+    }
     $settingsGroup.Controls.Add($settingsGrid)
     $settingsIntro = [Windows.Forms.Label]::new()
     $settingsIntro.Text = "Advanced installer sources. The default is JetKVM's current installer. The JetFUEL repo script is a copied reference/fallback in case JetKVM changes their hosted script."
@@ -4913,11 +4930,15 @@ Status log
         } catch {}
     }
     $metadataLabel = New-RowLabel $metadataText
+    $metadataLabel.AutoEllipsis = $true
     $requirementsLabel = [Windows.Forms.Label]::new()
     $requirementsLabel.Dock = "Fill"
     $requirementsLabel.ForeColor = $ui.Muted
     $requirementsLabel.Font = [Drawing.Font]::new("Segoe UI", 9)
-    $requirementsLabel.Text = "Custom script requirements:`r`n- POSIX shell script runnable by Git Bash or WSL bash.`r`n- Accepts: [-v|--version <tailscale-version>] [-y|--yes] [-c|--clean] <JetKVM-IP> [-- <tailscale up args...>].`r`n- Must install/configure Tailscale on JetKVM, handle reboot/return, and print any Tailscale login URL.`r`n- SSH calls should use standard ssh root@<ip> patterns or respect JETFUEL_SSH_OPTS so the wizard can patch/use the selected key."
+    $requirementsLabel.Text = "Custom scripts must follow JetFUEL's installer contract. See Help > Settings for arguments, SSH, reboot, and login URL requirements."
+    $requirementsLabel.TextAlign = "MiddleLeft"
+    $setupTips.SetToolTip($metadataLabel, $metadataText)
+    $setupTips.SetToolTip($requirementsLabel, "POSIX shell; accepts version/yes/clean/IP/tailscale-up arguments; handles install, reboot, login URL, and JETFUEL_SSH_OPTS.")
     $settingsGrid.Controls.Add($settingsIntro, 0, 0)
     $settingsGrid.SetColumnSpan($settingsIntro, 3)
     $settingsGrid.Controls.Add($metadataLabel, 0, 1)
@@ -4930,7 +4951,6 @@ Status log
     $settingsGrid.Controls.Add($browseInstallerButton, 2, 3)
     $settingsGrid.Controls.Add($requirementsLabel, 0, 4)
     $settingsGrid.SetColumnSpan($requirementsLabel, 3)
-    $settingsGrid.SetRowSpan($requirementsLabel, 4)
     $settingsLayout.Controls.Add($settingsGroup, 0, 0)
 
     $deviceSettingsGroup = New-Group "JetKVM device settings"
