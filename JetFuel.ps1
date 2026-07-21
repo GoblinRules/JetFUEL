@@ -458,6 +458,7 @@ function Invoke-JetFuelCleanup {
 
     Write-JetFuelCleanupLog -Log $Log -Message "Starting JetFUEL cleanup. SSH key files are left untouched."
     Remove-JetFuelTemporaryFiles -Log $Log
+    Remove-JetKvmDesktopClient -Log $Log -StopRunning
     Remove-JetFuelLocalCache -Log $Log
 
     $gitInfo = Get-GitForWindowsInstallInfo
@@ -482,7 +483,7 @@ function Invoke-JetFuelCleanup {
 
 function Get-JetKvmDesktopInstallRoot {
     if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
-        throw "LOCALAPPDATA is not available, so JetFUEL cannot manage the JetKVM Desktop client."
+        throw "LOCALAPPDATA is not available, so JetFUEL cannot manage the Web UI."
     }
     return (Join-Path $env:LOCALAPPDATA "JetFUEL\tools\jetkvm-desktop")
 }
@@ -560,7 +561,35 @@ function Invoke-JetFuelResponsiveDownload {
 function Assert-JetKvmDesktopNotRunning {
     $running = @(Get-Process -Name "jetkvm-desktop" -ErrorAction SilentlyContinue)
     if ($running.Count -gt 0) {
-        throw "JetKVM Desktop is running. Close it before installing, updating, or removing the managed client."
+        throw "The Web UI is running. Close it before installing or updating it. Uninstall and Exit cleanup can close the JetFUEL-managed process automatically."
+    }
+}
+
+function Stop-JetKvmDesktopClient {
+    param([scriptblock]$Log)
+
+    $state = Get-JetKvmDesktopState
+    if (-not $state.Installed) { return }
+
+    $managedExecutable = [IO.Path]::GetFullPath($state.Executable)
+    $managedProcesses = @(Get-Process -Name "jetkvm-desktop" -ErrorAction SilentlyContinue | Where-Object {
+        try {
+            $_.Path -and ([IO.Path]::GetFullPath($_.Path) -ieq $managedExecutable)
+        } catch {
+            $false
+        }
+    })
+    foreach ($process in $managedProcesses) {
+        if ($process.HasExited) { continue }
+        if ($process.MainWindowHandle -ne [IntPtr]::Zero) {
+            $null = $process.CloseMainWindow()
+            $null = $process.WaitForExit(3000)
+        }
+        if (-not $process.HasExited) {
+            Stop-Process -Id $process.Id -Force -ErrorAction Stop
+            $process.WaitForExit(3000)
+        }
+        if ($Log) { & $Log "Closed the JetFUEL-managed Web UI process." }
     }
 }
 
@@ -678,6 +707,29 @@ function Install-JetKvmDesktopClient {
         New-Item -ItemType Directory -Path $state.Root -Force | Out-Null
         $payloadRoot = $executable.Directory.FullName
         Copy-Item -Path (Join-Path $payloadRoot "*") -Destination $state.Root -Recurse -Force -ErrorAction Stop
+        @'
+MIT License
+
+Copyright (c) 2026 Lars Karlslund
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+'@ | Set-Content -LiteralPath (Join-Path $state.Root "LICENSE-jetkvm-desktop.txt") -Encoding UTF8
         $manifest = [ordered]@{
             version = $release.Version
             installedAt = (Get-Date).ToUniversalTime().ToString("o")
@@ -685,6 +737,7 @@ function Install-JetKvmDesktopClient {
             releaseUrl = $release.ReleaseUrl
             asset = $release.AssetName
             sha256 = $release.Sha256
+            license = "LICENSE-jetkvm-desktop.txt"
             runtimeSource = if ($runtimeFiles.Count -gt 0) { "Local Git for Windows x64 runtime" } else { "Upstream release" }
             runtimeFiles = @($runtimeFiles)
         }
@@ -692,7 +745,7 @@ function Install-JetKvmDesktopClient {
         if (-not (Test-Path -LiteralPath (Join-Path $state.Root "jetkvm-desktop.exe"))) {
             throw "JetKVM Desktop installation did not produce the expected executable."
         }
-        if ($Log) { & $Log "[OK] JetKVM Desktop $($release.Version) installed." }
+        if ($Log) { & $Log "[OK] JetFUEL Web UI $($release.Version) installed with the upstream MIT notice." }
         return (Get-JetKvmDesktopState)
     } finally {
         if (Test-Path -LiteralPath $workRoot) {
@@ -702,20 +755,27 @@ function Install-JetKvmDesktopClient {
 }
 
 function Remove-JetKvmDesktopClient {
-    param([scriptblock]$Log)
+    param(
+        [scriptblock]$Log,
+        [switch]$StopRunning
+    )
 
-    Assert-JetKvmDesktopNotRunning
+    if ($StopRunning) {
+        Stop-JetKvmDesktopClient -Log $Log
+    } else {
+        Assert-JetKvmDesktopNotRunning
+    }
     $state = Get-JetKvmDesktopState
     if (-not (Test-Path -LiteralPath $state.Root)) {
-        if ($Log) { & $Log "JetKVM Desktop is not installed by JetFUEL." }
+        if ($Log) { & $Log "The JetFUEL-managed Web UI is not installed." }
         return
     }
     $toolsRoot = Join-Path $env:LOCALAPPDATA "JetFUEL\tools"
     if (-not (Test-PathInsideDirectory -Path $state.Root -Root $toolsRoot)) {
-        throw "Refusing to remove JetKVM Desktop because its path is outside the JetFUEL tools directory."
+        throw "Refusing to remove the Web UI because its path is outside the JetFUEL tools directory."
     }
     Remove-Item -LiteralPath $state.Root -Recurse -Force -ErrorAction Stop
-    if ($Log) { & $Log "[OK] JetFUEL-managed JetKVM Desktop client removed." }
+    if ($Log) { & $Log "[OK] JetFUEL-managed Web UI and its private runtime files removed." }
 }
 
 function Start-JetKvmDesktopClient {
@@ -723,18 +783,19 @@ function Start-JetKvmDesktopClient {
 
     $state = Get-JetKvmDesktopState
     if (-not $state.Installed) {
-        throw "JetKVM Desktop is not installed. Use Install / update on the Desktop tab first."
+        throw "The Web UI is not installed. Use Install Web UI on the Web UI tab first."
     }
     $runtime = Test-JetKvmDesktopRuntimeDependencies -ExecutablePath $state.Executable
     if (-not $runtime.Ready) {
-        throw "The managed JetKVM Desktop client cannot start because these runtime files are missing: $($runtime.Missing -join ', '). Use Install / update after upstream publishes a corrected Windows release, or remove the client."
+        throw "The managed Web UI cannot start because these runtime files are missing: $($runtime.Missing -join ', '). Use Update / reinstall on the Web UI tab, or uninstall it."
     }
-    $arguments = @()
     if (-not [string]::IsNullOrWhiteSpace($JetKvmAddress)) {
         Assert-ValidIpOrHost -Value $JetKvmAddress
-        $arguments += $JetKvmAddress.Trim()
+        Start-Process -FilePath $state.Executable -ArgumentList @($JetKvmAddress.Trim()) -WorkingDirectory $state.Root | Out-Null
+    } else {
+        # Windows PowerShell 5.1 rejects -ArgumentList when the supplied array is empty.
+        Start-Process -FilePath $state.Executable -WorkingDirectory $state.Root | Out-Null
     }
-    Start-Process -FilePath $state.Executable -ArgumentList $arguments -WorkingDirectory $state.Root | Out-Null
 }
 
 function ConvertTo-BashPath {
@@ -4045,7 +4106,7 @@ function Start-JetFuelGuiV2 {
     $setupTabButton.Dock = "Fill"
     $setupTabButton.Margin = New-ScaledPadding 0 0 4 0
     $desktopTabButton = [Windows.Forms.Button]::new()
-    $desktopTabButton.Text = "Desktop"
+    $desktopTabButton.Text = "Web UI"
     $desktopTabButton.Dock = "Fill"
     $desktopTabButton.Margin = New-ScaledPadding 0 0 4 0
     $tailscaleTabButton = [Windows.Forms.Button]::new()
@@ -4278,14 +4339,14 @@ Exit / cleanup
 - SSH keys are left in place.
 - Git for Windows / Git Bash is only uninstalled after a second confirmation because other tools may use it.
 
-Desktop tab
-- Integrates the third-party community JetKVM Desktop client by Lars Karlslund. The client runs in its own native window; it is not embedded in JetFUEL.
-- Install / update fetches the latest Windows x64 release from the fixed lkarlslund/jetkvm-desktop GitHub repository and verifies GitHub's published SHA-256 before replacing JetFUEL's managed copy.
+Web UI tab
+- Installs a JetFUEL-managed enhanced Web UI component powered by Lars Karlslund's MIT-licensed JetKVM Desktop project. Its native video/input window is launched by JetFUEL because that Go/WebRTC interface cannot run inside PowerShell WinForms.
+- Install Web UI fetches the latest Windows x64 release from the fixed lkarlslund/jetkvm-desktop GitHub repository and verifies GitHub's published SHA-256 before replacing JetFUEL's managed copy.
 - Required runtime files are checked. If the upstream ZIP omits known MinGW files, JetFUEL can supply matching x64 copies from the local Git for Windows installation.
-- Discover JetKVMs opens the client without an address so its local discovery screen can find devices.
-- Connect to Setup address opens the client directly against the JetKVM address entered on the Setup tab.
+- Discover devices opens the Web UI without an address so its local discovery screen can find JetKVMs.
+- Open Setup device opens it directly against the JetKVM address entered on the Setup tab.
 - JetKVM passwords are prompted for by the desktop client and are not collected or stored by JetFUEL.
-- Remove client only removes the copy under %LOCALAPPDATA%\JetFUEL\tools. It does not change a JetKVM or SSH key.
+- Uninstall Web UI removes the executable and its private MinGW runtime copies under %LOCALAPPDATA%\JetFUEL\tools. Exit cleanup does the same automatically. Neither action changes a JetKVM or SSH key.
 - Project and license: https://github.com/lkarlslund/jetkvm-desktop/ (MIT).
 
 Tailscale tab
@@ -4639,7 +4700,7 @@ Status log
     $setupActionPanel.Controls.Add($runButton, 1, 0)
     $setupLayout.Controls.Add($setupActionPanel, 0, 3)
 
-    $desktopClientGroup = New-Group "JetKVM Desktop companion"
+    $desktopClientGroup = New-Group "JetFUEL Web UI"
     & $makeGroupAutoHeight $desktopClientGroup
     $desktopClientGrid = [Windows.Forms.TableLayoutPanel]::new()
     $desktopClientGrid.Dock = "Top"
@@ -4652,7 +4713,7 @@ Status log
     for ($i = 0; $i -lt 4; $i++) {
         $desktopClientGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::AutoSize)) | Out-Null
     }
-    $desktopIntro = New-RowLabel "Install and launch Lars Karlslund's community JetKVM Desktop client. It provides native video/input, local discovery, and direct connections in a separate window."
+    $desktopIntro = New-RowLabel "Install JetFUEL's managed enhanced Web UI, powered by Lars Karlslund's MIT-licensed JetKVM Desktop project. It provides native video/input, local discovery, and direct connections in a separate window."
     $desktopIntro.AutoSize = $true
     $desktopIntro.Dock = "Top"
     $desktopStatusLabel = New-RowLabel "Checking managed client..."
@@ -4666,27 +4727,27 @@ Status log
     $desktopActions.WrapContents = $true
     $desktopActions.Margin = New-ScaledPadding 0 5 0 2
     $installDesktopButton = [Windows.Forms.Button]::new()
-    $installDesktopButton.Text = "Install / update"
+    $installDesktopButton.Text = "Install Web UI"
     $installDesktopButton.Size = [Drawing.Size]::new((S 148), (S 36))
     $installDesktopButton.Margin = New-ScaledPadding 0 2 8 3
     Set-ButtonStyle $installDesktopButton "Primary"
     $discoverDesktopButton = [Windows.Forms.Button]::new()
-    $discoverDesktopButton.Text = "Discover JetKVMs"
+    $discoverDesktopButton.Text = "Discover devices"
     $discoverDesktopButton.Size = [Drawing.Size]::new((S 148), (S 36))
     $discoverDesktopButton.Margin = New-ScaledPadding 0 2 8 3
     Set-ButtonStyle $discoverDesktopButton "Secondary"
     $connectDesktopButton = [Windows.Forms.Button]::new()
-    $connectDesktopButton.Text = "Connect to Setup address"
+    $connectDesktopButton.Text = "Open Setup device"
     $connectDesktopButton.Size = [Drawing.Size]::new((S 190), (S 36))
     $connectDesktopButton.Margin = New-ScaledPadding 0 2 8 3
     Set-ButtonStyle $connectDesktopButton "Secondary"
     $removeDesktopButton = [Windows.Forms.Button]::new()
-    $removeDesktopButton.Text = "Remove client"
+    $removeDesktopButton.Text = "Uninstall Web UI"
     $removeDesktopButton.Size = [Drawing.Size]::new((S 132), (S 36))
     $removeDesktopButton.Margin = New-ScaledPadding 0 2 8 3
     Set-ButtonStyle $removeDesktopButton "Danger"
     $desktopActions.Controls.AddRange(@($installDesktopButton, $discoverDesktopButton, $connectDesktopButton, $removeDesktopButton))
-    $desktopSecurity = New-RowLabel "JetFUEL verifies the upstream release SHA-256 and required runtime files before installing it under %LOCALAPPDATA%\JetFUEL\tools. If the upstream ZIP omits known MinGW files, matching x64 copies may be supplied from the local Git for Windows runtime. Password prompts remain inside the desktop client and are not stored by JetFUEL."
+    $desktopSecurity = New-RowLabel "JetFUEL verifies the upstream release SHA-256 and required runtime files before installing it under %LOCALAPPDATA%\JetFUEL\tools. Missing matching x64 MinGW files are copied privately from Git for Windows. Exit cleanup removes this entire managed component; SSH keys remain untouched. Passwords stay inside the native Web UI window and are not stored by JetFUEL."
     $desktopSecurity.AutoSize = $true
     $desktopSecurity.Dock = "Top"
     $desktopSecurity.ForeColor = $ui.Muted
@@ -4697,7 +4758,7 @@ Status log
     $desktopClientGroup.Controls.Add($desktopClientGrid)
     $desktopLayout.Controls.Add($desktopClientGroup, 0, 0)
 
-    $desktopAboutGroup = New-Group "About and links"
+    $desktopAboutGroup = New-Group "License and source"
     & $makeGroupAutoHeight $desktopAboutGroup
     $desktopAboutGrid = [Windows.Forms.TableLayoutPanel]::new()
     $desktopAboutGrid.Dock = "Top"
@@ -4709,7 +4770,7 @@ Status log
     $desktopAboutGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
     $desktopAboutGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::AutoSize)) | Out-Null
     $desktopAboutGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::AutoSize)) | Out-Null
-    $desktopAbout = New-RowLabel "Community project by Lars Karlslund, distributed under the MIT License. It is not bundled with JetFUEL; Install / update downloads the current Windows x64 release directly from its GitHub repository."
+    $desktopAbout = New-RowLabel "The MIT license permits JetFUEL to use, modify, and redistribute the upstream work when its copyright and license notice are retained. JetFUEL currently installs a verified upstream Windows build on demand instead of maintaining a security-sensitive fork of its Go/WebRTC stack."
     $desktopAbout.AutoSize = $true
     $desktopAbout.Dock = "Top"
     $desktopLinks = [Windows.Forms.FlowLayoutPanel]::new()
@@ -5555,6 +5616,7 @@ Status log
             if ($desktopState.Installed) {
                 $versionText = if ($desktopState.Version) { $desktopState.Version } else { "version unknown" }
                 $runtime = Test-JetKvmDesktopRuntimeDependencies -ExecutablePath $desktopState.Executable
+                $installDesktopButton.Text = "Update / reinstall"
                 if ($runtime.Ready) {
                     $desktopStatusLabel.Text = "Installed and ready: $versionText"
                     $desktopStatusLabel.ForeColor = $ui.Good
@@ -5570,6 +5632,7 @@ Status log
             } else {
                 $desktopStatusLabel.Text = "Not installed by JetFUEL"
                 $desktopStatusLabel.ForeColor = $ui.Warn
+                $installDesktopButton.Text = "Install Web UI"
                 $discoverDesktopButton.Enabled = $false
                 $connectDesktopButton.Enabled = $false
                 $removeDesktopButton.Enabled = $false
@@ -5628,59 +5691,59 @@ Status log
 
     $installDesktopButton.Add_Click({
         try {
-            & $setBusy $true "Installing JetKVM Desktop..."
+            & $setBusy $true "Installing Web UI..."
             $installedState = Install-JetKvmDesktopClient -Log $log
-            & $setBusy $false "JetKVM Desktop $($installedState.Version) ready"
+            & $setBusy $false "Web UI $($installedState.Version) ready"
             [Windows.Forms.MessageBox]::Show(
-                "JetKVM Desktop $($installedState.Version) is installed and ready. Use Discover JetKVMs or Connect to Setup address.",
-                "JetKVM Desktop",
+                "The JetFUEL-managed Web UI $($installedState.Version) is installed with its required runtime files. Use Discover devices or Open Setup device.",
+                "JetFUEL Web UI",
                 "OK",
                 "Information"
             ) | Out-Null
         } catch {
             & $log ("ERROR: " + $_.Exception.Message)
-            & $setBusy $false "Desktop client install failed"
-            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetKVM Desktop", "OK", "Error") | Out-Null
+            & $setBusy $false "Web UI install failed"
+            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL Web UI", "OK", "Error") | Out-Null
         }
     })
     $discoverDesktopButton.Add_Click({
         try {
             Start-JetKvmDesktopClient
-            & $log "Opened JetKVM Desktop discovery."
+            & $log "Opened Web UI device discovery."
         } catch {
             & $log ("ERROR: " + $_.Exception.Message)
-            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetKVM Desktop", "OK", "Error") | Out-Null
+            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL Web UI", "OK", "Error") | Out-Null
         }
     })
     $connectDesktopButton.Add_Click({
         try {
             $address = $ipBox.Text.Trim()
             if ([string]::IsNullOrWhiteSpace($address)) {
-                throw "Enter a JetKVM address on the Setup tab first, or use Discover JetKVMs."
+                throw "Enter a JetKVM address on the Setup tab first, or use Discover devices."
             }
             Start-JetKvmDesktopClient -JetKvmAddress $address
-            & $log "Opened JetKVM Desktop for $address."
+            & $log "Opened the Web UI for $address."
         } catch {
             & $log ("ERROR: " + $_.Exception.Message)
-            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetKVM Desktop", "OK", "Error") | Out-Null
+            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL Web UI", "OK", "Error") | Out-Null
         }
     })
     $removeDesktopButton.Add_Click({
         try {
             $answer = [Windows.Forms.MessageBox]::Show(
-                "Remove the JetFUEL-managed JetKVM Desktop client? This does not change any JetKVM device or SSH key.",
-                "Remove JetKVM Desktop",
+                "Uninstall the JetFUEL-managed Web UI and its private MinGW runtime files? This does not change any JetKVM device or SSH key.",
+                "Uninstall Web UI",
                 "YesNo",
                 "Warning"
             )
             if ($answer -ne [Windows.Forms.DialogResult]::Yes) { return }
-            & $setBusy $true "Removing JetKVM Desktop..."
-            Remove-JetKvmDesktopClient -Log $log
-            & $setBusy $false "JetKVM Desktop removed"
+            & $setBusy $true "Uninstalling Web UI..."
+            Remove-JetKvmDesktopClient -Log $log -StopRunning
+            & $setBusy $false "Web UI uninstalled"
         } catch {
             & $log ("ERROR: " + $_.Exception.Message)
-            & $setBusy $false "Desktop client removal failed"
-            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetKVM Desktop", "OK", "Error") | Out-Null
+            & $setBusy $false "Web UI uninstall failed"
+            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL Web UI", "OK", "Error") | Out-Null
         }
     })
     $desktopProjectButton.Add_Click({ Start-Process "https://github.com/lkarlslund/jetkvm-desktop/" })
@@ -5846,7 +5909,7 @@ Status log
     })
     $exitButton.Add_Click({
         $choice = [Windows.Forms.MessageBox]::Show(
-            "Exit JetFUEL?`r`n`r`nYes = clean up JetFUEL temp/downloaded files, optionally uninstall Git Bash, then exit.`r`nNo = exit only.`r`nCancel = stay here.`r`n`r`nSSH key files are left in place.",
+            "Exit JetFUEL?`r`n`r`nYes = uninstall the JetFUEL-managed Web UI and its private MinGW files, clean up JetFUEL temp/downloaded files, optionally uninstall Git Bash, then exit.`r`nNo = exit only and leave installed tools in place.`r`nCancel = stay here.`r`n`r`nSSH key files are always left in place.",
             "Exit JetFUEL",
             "YesNoCancel",
             "Warning"
