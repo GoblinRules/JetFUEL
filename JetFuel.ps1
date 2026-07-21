@@ -480,6 +480,263 @@ function Invoke-JetFuelCleanup {
     Write-JetFuelCleanupLog -Log $Log -Message "Cleanup complete. SSH key files were not changed."
 }
 
+function Get-JetKvmDesktopInstallRoot {
+    if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+        throw "LOCALAPPDATA is not available, so JetFUEL cannot manage the JetKVM Desktop client."
+    }
+    return (Join-Path $env:LOCALAPPDATA "JetFUEL\tools\jetkvm-desktop")
+}
+
+function Get-JetKvmDesktopState {
+    $root = Get-JetKvmDesktopInstallRoot
+    $executable = Join-Path $root "jetkvm-desktop.exe"
+    $manifestPath = Join-Path $root "jetfuel-install.json"
+    $manifest = $null
+    if (Test-Path -LiteralPath $manifestPath) {
+        try {
+            $manifest = Get-Content -LiteralPath $manifestPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        } catch {}
+    }
+    return [pscustomobject]@{
+        Installed = Test-Path -LiteralPath $executable
+        Root = $root
+        Executable = $executable
+        ManifestPath = $manifestPath
+        Version = if ($manifest -and $manifest.version) { [string]$manifest.version } else { $null }
+        ReleaseUrl = if ($manifest -and $manifest.releaseUrl) { [string]$manifest.releaseUrl } else { $null }
+    }
+}
+
+function Get-JetKvmDesktopLatestRelease {
+    $headers = @{
+        Accept = "application/vnd.github+json"
+        "User-Agent" = "JetFUEL"
+        "X-GitHub-Api-Version" = "2022-11-28"
+    }
+    $release = Invoke-RestMethod -UseBasicParsing -Uri "https://api.github.com/repos/lkarlslund/jetkvm-desktop/releases/latest" -Headers $headers -ErrorAction Stop
+    $asset = @($release.assets | Where-Object { $_.name -eq "jetkvm-desktop-windows-amd64.zip" }) | Select-Object -First 1
+    if (-not $asset) {
+        throw "The latest jetkvm-desktop release does not contain the expected Windows x64 ZIP."
+    }
+    $digest = [string]$asset.digest
+    $digestMatch = [regex]::Match($digest, '^sha256:([0-9a-fA-F]{64})$')
+    if (-not $digestMatch.Success) {
+        throw "The jetkvm-desktop Windows release does not publish a usable SHA-256 digest."
+    }
+    return [pscustomobject]@{
+        Version = [string]$release.tag_name
+        ReleaseUrl = [string]$release.html_url
+        AssetUrl = [string]$asset.browser_download_url
+        AssetName = [string]$asset.name
+        Sha256 = $digestMatch.Groups[1].Value.ToUpperInvariant()
+    }
+}
+
+function Invoke-JetFuelResponsiveDownload {
+    param(
+        [Parameter(Mandatory)][string]$Uri,
+        [Parameter(Mandatory)][string]$Destination
+    )
+
+    $client = [Net.WebClient]::new()
+    $client.Headers[[Net.HttpRequestHeader]::UserAgent] = "JetFUEL"
+    try {
+        $task = $client.DownloadFileTaskAsync([Uri]$Uri, $Destination)
+        while (-not $task.IsCompleted) {
+            [Windows.Forms.Application]::DoEvents()
+            Start-Sleep -Milliseconds 60
+        }
+        if ($task.IsFaulted) {
+            throw $task.Exception.GetBaseException()
+        }
+        if ($task.IsCanceled) {
+            throw "The download was cancelled."
+        }
+    } finally {
+        $client.Dispose()
+    }
+}
+
+function Assert-JetKvmDesktopNotRunning {
+    $running = @(Get-Process -Name "jetkvm-desktop" -ErrorAction SilentlyContinue)
+    if ($running.Count -gt 0) {
+        throw "JetKVM Desktop is running. Close it before installing, updating, or removing the managed client."
+    }
+}
+
+function Test-JetKvmDesktopRuntimeDependencies {
+    param([Parameter(Mandatory)][string]$ExecutablePath)
+
+    if (-not (Test-Path -LiteralPath $ExecutablePath)) {
+        return [pscustomobject]@{ Ready = $false; Missing = @("jetkvm-desktop.exe") }
+    }
+
+    # Current upstream releases are intended to be statically linked. Detect the
+    # MinGW imports that made v0.2.0 unusable on a normal Windows installation.
+    $knownRuntimeDlls = @("libgcc_s_seh-1.dll", "libstdc++-6.dll", "libwinpthread-1.dll", "libssp-0.dll")
+    $binaryText = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($ExecutablePath))
+    $executableDirectory = Split-Path -Parent $ExecutablePath
+    $systemDirectory = [Environment]::SystemDirectory
+    $missing = @()
+    foreach ($dllName in $knownRuntimeDlls) {
+        if ($binaryText.IndexOf($dllName, [StringComparison]::OrdinalIgnoreCase) -lt 0) { continue }
+        $besideExecutable = Join-Path $executableDirectory $dllName
+        $inSystemDirectory = Join-Path $systemDirectory $dllName
+        if (-not (Test-Path -LiteralPath $besideExecutable) -and -not (Test-Path -LiteralPath $inSystemDirectory)) {
+            $missing += $dllName
+        }
+    }
+
+    return [pscustomobject]@{
+        Ready = $missing.Count -eq 0
+        Missing = @($missing)
+    }
+}
+
+function Get-PeMachineCode {
+    param([Parameter(Mandatory)][string]$Path)
+
+    $stream = [IO.File]::OpenRead($Path)
+    $reader = [IO.BinaryReader]::new($stream)
+    try {
+        if ($reader.ReadUInt16() -ne 0x5A4D) { return 0 }
+        $stream.Position = 0x3C
+        $peOffset = $reader.ReadInt32()
+        if ($peOffset -lt 0 -or $peOffset -gt ($stream.Length - 6)) { return 0 }
+        $stream.Position = $peOffset
+        if ($reader.ReadUInt32() -ne 0x00004550) { return 0 }
+        return $reader.ReadUInt16()
+    } finally {
+        $reader.Dispose()
+        $stream.Dispose()
+    }
+}
+
+function Add-JetKvmDesktopRuntimeDependencies {
+    param(
+        [Parameter(Mandatory)][string]$ExecutablePath,
+        [scriptblock]$Log
+    )
+
+    $runtime = Test-JetKvmDesktopRuntimeDependencies -ExecutablePath $ExecutablePath
+    if ($runtime.Ready) { return @() }
+
+    $gitInfo = Get-GitForWindowsInstallInfo
+    if (-not $gitInfo) {
+        throw "The upstream JetKVM Desktop Windows package requires $($runtime.Missing -join ', ') but does not include them. Run Setup preflight and install Git for Windows, then retry, or wait for a corrected upstream release."
+    }
+    $gitRuntimeDirectory = Join-Path $gitInfo.Root "mingw64\bin"
+    $executableMachine = Get-PeMachineCode -Path $ExecutablePath
+    if ($executableMachine -ne 0x8664) {
+        throw "The downloaded JetKVM Desktop executable is not the expected Windows x64 build."
+    }
+
+    $copied = @()
+    foreach ($dllName in $runtime.Missing) {
+        $source = Join-Path $gitRuntimeDirectory $dllName
+        if (-not (Test-Path -LiteralPath $source)) { continue }
+        if ((Get-PeMachineCode -Path $source) -ne $executableMachine) { continue }
+        Copy-Item -LiteralPath $source -Destination (Split-Path -Parent $ExecutablePath) -Force -ErrorAction Stop
+        $copied += $dllName
+        if ($Log) { & $Log "[OK] Added $dllName from the local Git for Windows x64 runtime." }
+    }
+
+    $runtime = Test-JetKvmDesktopRuntimeDependencies -ExecutablePath $ExecutablePath
+    if (-not $runtime.Ready) {
+        throw "The upstream JetKVM Desktop Windows package is missing required runtime files: $($runtime.Missing -join ', '). JetFUEL could not obtain matching x64 files from the local Git for Windows installation."
+    }
+    return @($copied)
+}
+
+function Install-JetKvmDesktopClient {
+    param([scriptblock]$Log)
+
+    Assert-JetKvmDesktopNotRunning
+    $release = Get-JetKvmDesktopLatestRelease
+    $state = Get-JetKvmDesktopState
+    $workRoot = Join-Path ([IO.Path]::GetTempPath()) ("JetFUEL-desktop-" + [Guid]::NewGuid().ToString("N"))
+    $archivePath = Join-Path $workRoot $release.AssetName
+    $stagingPath = Join-Path $workRoot "staging"
+    try {
+        New-Item -ItemType Directory -Path $stagingPath -Force | Out-Null
+        if ($Log) { & $Log "Downloading JetKVM Desktop $($release.Version) from the pinned upstream repository..." }
+        Invoke-JetFuelResponsiveDownload -Uri $release.AssetUrl -Destination $archivePath
+        $actualHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256 -ErrorAction Stop).Hash.ToUpperInvariant()
+        if ($actualHash -ne $release.Sha256) {
+            throw "JetKVM Desktop SHA-256 verification failed. Expected $($release.Sha256), received $actualHash."
+        }
+        if ($Log) { & $Log "[OK] JetKVM Desktop download SHA-256 verified." }
+        Expand-Archive -LiteralPath $archivePath -DestinationPath $stagingPath -Force
+        $executable = Get-ChildItem -LiteralPath $stagingPath -Filter "jetkvm-desktop.exe" -File -Recurse | Select-Object -First 1
+        if (-not $executable) {
+            throw "The verified JetKVM Desktop archive did not contain jetkvm-desktop.exe."
+        }
+        $runtimeFiles = @(Add-JetKvmDesktopRuntimeDependencies -ExecutablePath $executable.FullName -Log $Log)
+        if (Test-Path -LiteralPath $state.Root) {
+            Remove-Item -LiteralPath $state.Root -Recurse -Force -ErrorAction Stop
+        }
+        New-Item -ItemType Directory -Path $state.Root -Force | Out-Null
+        $payloadRoot = $executable.Directory.FullName
+        Copy-Item -Path (Join-Path $payloadRoot "*") -Destination $state.Root -Recurse -Force -ErrorAction Stop
+        $manifest = [ordered]@{
+            version = $release.Version
+            installedAt = (Get-Date).ToUniversalTime().ToString("o")
+            repository = "https://github.com/lkarlslund/jetkvm-desktop"
+            releaseUrl = $release.ReleaseUrl
+            asset = $release.AssetName
+            sha256 = $release.Sha256
+            runtimeSource = if ($runtimeFiles.Count -gt 0) { "Local Git for Windows x64 runtime" } else { "Upstream release" }
+            runtimeFiles = @($runtimeFiles)
+        }
+        $manifest | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $state.Root "jetfuel-install.json") -Encoding UTF8
+        if (-not (Test-Path -LiteralPath (Join-Path $state.Root "jetkvm-desktop.exe"))) {
+            throw "JetKVM Desktop installation did not produce the expected executable."
+        }
+        if ($Log) { & $Log "[OK] JetKVM Desktop $($release.Version) installed." }
+        return (Get-JetKvmDesktopState)
+    } finally {
+        if (Test-Path -LiteralPath $workRoot) {
+            Remove-Item -LiteralPath $workRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Remove-JetKvmDesktopClient {
+    param([scriptblock]$Log)
+
+    Assert-JetKvmDesktopNotRunning
+    $state = Get-JetKvmDesktopState
+    if (-not (Test-Path -LiteralPath $state.Root)) {
+        if ($Log) { & $Log "JetKVM Desktop is not installed by JetFUEL." }
+        return
+    }
+    $toolsRoot = Join-Path $env:LOCALAPPDATA "JetFUEL\tools"
+    if (-not (Test-PathInsideDirectory -Path $state.Root -Root $toolsRoot)) {
+        throw "Refusing to remove JetKVM Desktop because its path is outside the JetFUEL tools directory."
+    }
+    Remove-Item -LiteralPath $state.Root -Recurse -Force -ErrorAction Stop
+    if ($Log) { & $Log "[OK] JetFUEL-managed JetKVM Desktop client removed." }
+}
+
+function Start-JetKvmDesktopClient {
+    param([string]$JetKvmAddress)
+
+    $state = Get-JetKvmDesktopState
+    if (-not $state.Installed) {
+        throw "JetKVM Desktop is not installed. Use Install / update on the Desktop tab first."
+    }
+    $runtime = Test-JetKvmDesktopRuntimeDependencies -ExecutablePath $state.Executable
+    if (-not $runtime.Ready) {
+        throw "The managed JetKVM Desktop client cannot start because these runtime files are missing: $($runtime.Missing -join ', '). Use Install / update after upstream publishes a corrected Windows release, or remove the client."
+    }
+    $arguments = @()
+    if (-not [string]::IsNullOrWhiteSpace($JetKvmAddress)) {
+        Assert-ValidIpOrHost -Value $JetKvmAddress
+        $arguments += $JetKvmAddress.Trim()
+    }
+    Start-Process -FilePath $state.Executable -ArgumentList $arguments -WorkingDirectory $state.Root | Out-Null
+}
+
 function ConvertTo-BashPath {
     param(
         [Parameter(Mandatory)][string]$BashPath,
@@ -3776,9 +4033,9 @@ function Start-JetFuelGuiV2 {
     $navPanel = [Windows.Forms.TableLayoutPanel]::new()
     $navPanel.Dock = "Fill"
     $navPanel.BackColor = $ui.Window
-    $navPanel.ColumnCount = 8
+    $navPanel.ColumnCount = 9
     $navPanel.RowCount = 1
-    foreach ($width in @(100, 100, 100, 112, 132, 100, 100)) {
+    foreach ($width in @(82, 88, 88, 84, 100, 118, 88, 72)) {
         $navPanel.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, (S $width))) | Out-Null
     }
     $navPanel.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
@@ -3787,6 +4044,10 @@ function Start-JetFuelGuiV2 {
     $setupTabButton.Text = "Setup"
     $setupTabButton.Dock = "Fill"
     $setupTabButton.Margin = New-ScaledPadding 0 0 4 0
+    $desktopTabButton = [Windows.Forms.Button]::new()
+    $desktopTabButton.Text = "Desktop"
+    $desktopTabButton.Dock = "Fill"
+    $desktopTabButton.Margin = New-ScaledPadding 0 0 4 0
     $tailscaleTabButton = [Windows.Forms.Button]::new()
     $tailscaleTabButton.Text = "Tailscale"
     $tailscaleTabButton.Dock = "Fill"
@@ -3812,6 +4073,7 @@ function Start-JetFuelGuiV2 {
     $helpTabButton.Dock = "Fill"
     $helpTabButton.Margin = New-ScaledPadding 0 0 4 0
     Set-ButtonStyle $setupTabButton "Primary"
+    Set-ButtonStyle $desktopTabButton "Secondary"
     Set-ButtonStyle $tailscaleTabButton "Secondary"
     Set-ButtonStyle $identityTabButton "Secondary"
     Set-ButtonStyle $diagnosticsTabButton "Secondary"
@@ -3819,12 +4081,13 @@ function Start-JetFuelGuiV2 {
     Set-ButtonStyle $settingsTabButton "Secondary"
     Set-ButtonStyle $helpTabButton "Secondary"
     $navPanel.Controls.Add($setupTabButton, 0, 0)
-    $navPanel.Controls.Add($tailscaleTabButton, 1, 0)
-    $navPanel.Controls.Add($identityTabButton, 2, 0)
-    $navPanel.Controls.Add($diagnosticsTabButton, 3, 0)
-    $navPanel.Controls.Add($biosTabButton, 4, 0)
-    $navPanel.Controls.Add($settingsTabButton, 5, 0)
-    $navPanel.Controls.Add($helpTabButton, 6, 0)
+    $navPanel.Controls.Add($desktopTabButton, 1, 0)
+    $navPanel.Controls.Add($tailscaleTabButton, 2, 0)
+    $navPanel.Controls.Add($identityTabButton, 3, 0)
+    $navPanel.Controls.Add($diagnosticsTabButton, 4, 0)
+    $navPanel.Controls.Add($biosTabButton, 5, 0)
+    $navPanel.Controls.Add($settingsTabButton, 6, 0)
+    $navPanel.Controls.Add($helpTabButton, 7, 0)
 
     $pageHost = [Windows.Forms.Panel]::new()
     $pageHost.Dock = "Fill"
@@ -3834,6 +4097,10 @@ function Start-JetFuelGuiV2 {
     $setupPage.Dock = "Fill"
     $setupPage.BackColor = $ui.Window
     $setupPage.AutoScroll = $true
+    $desktopPage = [Windows.Forms.Panel]::new()
+    $desktopPage.Dock = "Fill"
+    $desktopPage.BackColor = $ui.Window
+    $desktopPage.AutoScroll = $true
     $tailscalePage = [Windows.Forms.Panel]::new()
     $tailscalePage.Dock = "Fill"
     $tailscalePage.BackColor = $ui.Window
@@ -3893,6 +4160,18 @@ function Start-JetFuelGuiV2 {
     $tailscaleLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, (S 76))) | Out-Null
     $tailscaleLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::AutoSize)) | Out-Null
     $tailscalePage.Controls.Add($tailscaleLayout)
+
+    $desktopLayout = [Windows.Forms.TableLayoutPanel]::new()
+    $desktopLayout.Dock = "Top"
+    $desktopLayout.AutoSize = $true
+    $desktopLayout.AutoSizeMode = [Windows.Forms.AutoSizeMode]::GrowAndShrink
+    $desktopLayout.BackColor = $ui.Window
+    $desktopLayout.ColumnCount = 1
+    $desktopLayout.RowCount = 2
+    $desktopLayout.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
+    $desktopLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::AutoSize)) | Out-Null
+    $desktopLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::AutoSize)) | Out-Null
+    $desktopPage.Controls.Add($desktopLayout)
 
     $settingsLayout = [Windows.Forms.TableLayoutPanel]::new()
     $settingsLayout.Dock = "Top"
@@ -3995,9 +4274,19 @@ Setup tab
 
 Exit / cleanup
 - The red EXIT button asks whether to exit only, clean up and exit, or cancel.
-- Cleanup removes JetFUEL temp folders and the downloaded %LOCALAPPDATA%\JetFUEL bootstrap copy when present.
+- Cleanup removes JetFUEL temp folders, the downloaded %LOCALAPPDATA%\JetFUEL bootstrap copy, and any JetFUEL-managed JetKVM Desktop client.
 - SSH keys are left in place.
 - Git for Windows / Git Bash is only uninstalled after a second confirmation because other tools may use it.
+
+Desktop tab
+- Integrates the third-party community JetKVM Desktop client by Lars Karlslund. The client runs in its own native window; it is not embedded in JetFUEL.
+- Install / update fetches the latest Windows x64 release from the fixed lkarlslund/jetkvm-desktop GitHub repository and verifies GitHub's published SHA-256 before replacing JetFUEL's managed copy.
+- Required runtime files are checked. If the upstream ZIP omits known MinGW files, JetFUEL can supply matching x64 copies from the local Git for Windows installation.
+- Discover JetKVMs opens the client without an address so its local discovery screen can find devices.
+- Connect to Setup address opens the client directly against the JetKVM address entered on the Setup tab.
+- JetKVM passwords are prompted for by the desktop client and are not collected or stored by JetFUEL.
+- Remove client only removes the copy under %LOCALAPPDATA%\JetFUEL\tools. It does not change a JetKVM or SSH key.
+- Project and license: https://github.com/lkarlslund/jetkvm-desktop/ (MIT).
 
 Tailscale tab
 - Check Tailscale prints status, Tailscale IP, version, routes, DNS, and running Tailscale processes.
@@ -4078,10 +4367,11 @@ Status log
 "@
     $helpPage.Controls.Add($helpBox)
 
-    $pageHost.Controls.AddRange(@($helpPage, $settingsPage, $biosPage, $diagnosticsPage, $identityPage, $tailscalePage, $setupPage))
+    $pageHost.Controls.AddRange(@($helpPage, $settingsPage, $biosPage, $diagnosticsPage, $identityPage, $tailscalePage, $desktopPage, $setupPage))
     $showPage = {
         param([string]$Name)
         $setupPage.Visible = ($Name -eq "Setup")
+        $desktopPage.Visible = ($Name -eq "Desktop")
         $tailscalePage.Visible = ($Name -eq "Tailscale")
         $identityPage.Visible = ($Name -eq "Identity")
         $diagnosticsPage.Visible = ($Name -eq "Diagnostics")
@@ -4089,6 +4379,7 @@ Status log
         $settingsPage.Visible = ($Name -eq "Settings")
         $helpPage.Visible = ($Name -eq "Help")
         Set-ButtonStyle $setupTabButton $(if ($Name -eq "Setup") { "Primary" } else { "Secondary" })
+        Set-ButtonStyle $desktopTabButton $(if ($Name -eq "Desktop") { "Primary" } else { "Secondary" })
         Set-ButtonStyle $tailscaleTabButton $(if ($Name -eq "Tailscale") { "Primary" } else { "Secondary" })
         Set-ButtonStyle $identityTabButton $(if ($Name -eq "Identity") { "Primary" } else { "Secondary" })
         Set-ButtonStyle $diagnosticsTabButton $(if ($Name -eq "Diagnostics") { "Primary" } else { "Secondary" })
@@ -4097,6 +4388,7 @@ Status log
         Set-ButtonStyle $helpTabButton $(if ($Name -eq "Help") { "Primary" } else { "Secondary" })
     }
     $setupTabButton.Add_Click({ & $showPage "Setup" })
+    $desktopTabButton.Add_Click({ & $showPage "Desktop" })
     $tailscaleTabButton.Add_Click({ & $showPage "Tailscale" })
     $identityTabButton.Add_Click({ & $showPage "Identity" })
     $diagnosticsTabButton.Add_Click({ & $showPage "Diagnostics" })
@@ -4346,6 +4638,110 @@ Status log
     $setupActionPanel.Controls.Add($statusLabel, 0, 0)
     $setupActionPanel.Controls.Add($runButton, 1, 0)
     $setupLayout.Controls.Add($setupActionPanel, 0, 3)
+
+    $desktopClientGroup = New-Group "JetKVM Desktop companion"
+    & $makeGroupAutoHeight $desktopClientGroup
+    $desktopClientGrid = [Windows.Forms.TableLayoutPanel]::new()
+    $desktopClientGrid.Dock = "Top"
+    $desktopClientGrid.AutoSize = $true
+    $desktopClientGrid.AutoSizeMode = [Windows.Forms.AutoSizeMode]::GrowAndShrink
+    $desktopClientGrid.ColumnCount = 1
+    $desktopClientGrid.RowCount = 4
+    $desktopClientGrid.Padding = New-ScaledPadding 8 6 8 5
+    $desktopClientGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
+    for ($i = 0; $i -lt 4; $i++) {
+        $desktopClientGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::AutoSize)) | Out-Null
+    }
+    $desktopIntro = New-RowLabel "Install and launch Lars Karlslund's community JetKVM Desktop client. It provides native video/input, local discovery, and direct connections in a separate window."
+    $desktopIntro.AutoSize = $true
+    $desktopIntro.Dock = "Top"
+    $desktopStatusLabel = New-RowLabel "Checking managed client..."
+    $desktopStatusLabel.AutoSize = $true
+    $desktopStatusLabel.Dock = "Top"
+    $desktopStatusLabel.Font = [Drawing.Font]::new("Segoe UI", 10, [Drawing.FontStyle]::Bold)
+    $desktopActions = [Windows.Forms.FlowLayoutPanel]::new()
+    $desktopActions.Dock = "Top"
+    $desktopActions.AutoSize = $true
+    $desktopActions.AutoSizeMode = [Windows.Forms.AutoSizeMode]::GrowAndShrink
+    $desktopActions.WrapContents = $true
+    $desktopActions.Margin = New-ScaledPadding 0 5 0 2
+    $installDesktopButton = [Windows.Forms.Button]::new()
+    $installDesktopButton.Text = "Install / update"
+    $installDesktopButton.Size = [Drawing.Size]::new((S 148), (S 36))
+    $installDesktopButton.Margin = New-ScaledPadding 0 2 8 3
+    Set-ButtonStyle $installDesktopButton "Primary"
+    $discoverDesktopButton = [Windows.Forms.Button]::new()
+    $discoverDesktopButton.Text = "Discover JetKVMs"
+    $discoverDesktopButton.Size = [Drawing.Size]::new((S 148), (S 36))
+    $discoverDesktopButton.Margin = New-ScaledPadding 0 2 8 3
+    Set-ButtonStyle $discoverDesktopButton "Secondary"
+    $connectDesktopButton = [Windows.Forms.Button]::new()
+    $connectDesktopButton.Text = "Connect to Setup address"
+    $connectDesktopButton.Size = [Drawing.Size]::new((S 190), (S 36))
+    $connectDesktopButton.Margin = New-ScaledPadding 0 2 8 3
+    Set-ButtonStyle $connectDesktopButton "Secondary"
+    $removeDesktopButton = [Windows.Forms.Button]::new()
+    $removeDesktopButton.Text = "Remove client"
+    $removeDesktopButton.Size = [Drawing.Size]::new((S 132), (S 36))
+    $removeDesktopButton.Margin = New-ScaledPadding 0 2 8 3
+    Set-ButtonStyle $removeDesktopButton "Danger"
+    $desktopActions.Controls.AddRange(@($installDesktopButton, $discoverDesktopButton, $connectDesktopButton, $removeDesktopButton))
+    $desktopSecurity = New-RowLabel "JetFUEL verifies the upstream release SHA-256 and required runtime files before installing it under %LOCALAPPDATA%\JetFUEL\tools. If the upstream ZIP omits known MinGW files, matching x64 copies may be supplied from the local Git for Windows runtime. Password prompts remain inside the desktop client and are not stored by JetFUEL."
+    $desktopSecurity.AutoSize = $true
+    $desktopSecurity.Dock = "Top"
+    $desktopSecurity.ForeColor = $ui.Muted
+    $desktopClientGrid.Controls.Add($desktopIntro, 0, 0)
+    $desktopClientGrid.Controls.Add($desktopStatusLabel, 0, 1)
+    $desktopClientGrid.Controls.Add($desktopActions, 0, 2)
+    $desktopClientGrid.Controls.Add($desktopSecurity, 0, 3)
+    $desktopClientGroup.Controls.Add($desktopClientGrid)
+    $desktopLayout.Controls.Add($desktopClientGroup, 0, 0)
+
+    $desktopAboutGroup = New-Group "About and links"
+    & $makeGroupAutoHeight $desktopAboutGroup
+    $desktopAboutGrid = [Windows.Forms.TableLayoutPanel]::new()
+    $desktopAboutGrid.Dock = "Top"
+    $desktopAboutGrid.AutoSize = $true
+    $desktopAboutGrid.AutoSizeMode = [Windows.Forms.AutoSizeMode]::GrowAndShrink
+    $desktopAboutGrid.ColumnCount = 1
+    $desktopAboutGrid.RowCount = 2
+    $desktopAboutGrid.Padding = New-ScaledPadding 8 6 8 5
+    $desktopAboutGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
+    $desktopAboutGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::AutoSize)) | Out-Null
+    $desktopAboutGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::AutoSize)) | Out-Null
+    $desktopAbout = New-RowLabel "Community project by Lars Karlslund, distributed under the MIT License. It is not bundled with JetFUEL; Install / update downloads the current Windows x64 release directly from its GitHub repository."
+    $desktopAbout.AutoSize = $true
+    $desktopAbout.Dock = "Top"
+    $desktopLinks = [Windows.Forms.FlowLayoutPanel]::new()
+    $desktopLinks.Dock = "Top"
+    $desktopLinks.AutoSize = $true
+    $desktopLinks.AutoSizeMode = [Windows.Forms.AutoSizeMode]::GrowAndShrink
+    $desktopLinks.WrapContents = $true
+    $desktopLinks.Margin = New-ScaledPadding 0 5 0 2
+    $desktopProjectButton = [Windows.Forms.Button]::new()
+    $desktopProjectButton.Text = "Project page"
+    $desktopProjectButton.Size = [Drawing.Size]::new((S 132), (S 34))
+    $desktopProjectButton.Margin = New-ScaledPadding 0 2 8 3
+    Set-ButtonStyle $desktopProjectButton "Secondary"
+    $desktopReleasesButton = [Windows.Forms.Button]::new()
+    $desktopReleasesButton.Text = "Release notes"
+    $desktopReleasesButton.Size = [Drawing.Size]::new((S 132), (S 34))
+    $desktopReleasesButton.Margin = New-ScaledPadding 0 2 8 3
+    Set-ButtonStyle $desktopReleasesButton "Secondary"
+    $desktopLinks.Controls.AddRange(@($desktopProjectButton, $desktopReleasesButton))
+    $desktopAboutGrid.Controls.Add($desktopAbout, 0, 0)
+    $desktopAboutGrid.Controls.Add($desktopLinks, 0, 1)
+    $desktopAboutGroup.Controls.Add($desktopAboutGrid)
+    $desktopLayout.Controls.Add($desktopAboutGroup, 0, 1)
+    $resizeDesktopText = {
+        $maximumWidth = [Math]::Max((S 360), $desktopPage.ClientSize.Width - (S 54))
+        foreach ($label in @($desktopIntro, $desktopSecurity, $desktopAbout)) {
+            $label.MaximumSize = [Drawing.Size]::new($maximumWidth, 0)
+        }
+    }
+    $desktopPage.Add_SizeChanged({ & $resizeDesktopText })
+    $desktopPage.Add_VisibleChanged({ if ($desktopPage.Visible) { & $resizeDesktopText } })
+    & $resizeDesktopText
 
     $actionPanel = [Windows.Forms.TableLayoutPanel]::new()
     $actionPanel.Dock = "Top"
@@ -5153,6 +5549,41 @@ Status log
         Scan = $null
     }
 
+    $refreshDesktopStatus = {
+        try {
+            $desktopState = Get-JetKvmDesktopState
+            if ($desktopState.Installed) {
+                $versionText = if ($desktopState.Version) { $desktopState.Version } else { "version unknown" }
+                $runtime = Test-JetKvmDesktopRuntimeDependencies -ExecutablePath $desktopState.Executable
+                if ($runtime.Ready) {
+                    $desktopStatusLabel.Text = "Installed and ready: $versionText"
+                    $desktopStatusLabel.ForeColor = $ui.Good
+                    $discoverDesktopButton.Enabled = $true
+                    $connectDesktopButton.Enabled = $true
+                } else {
+                    $desktopStatusLabel.Text = "Installed but unusable - missing: $($runtime.Missing -join ', ')"
+                    $desktopStatusLabel.ForeColor = $ui.Bad
+                    $discoverDesktopButton.Enabled = $false
+                    $connectDesktopButton.Enabled = $false
+                }
+                $removeDesktopButton.Enabled = $true
+            } else {
+                $desktopStatusLabel.Text = "Not installed by JetFUEL"
+                $desktopStatusLabel.ForeColor = $ui.Warn
+                $discoverDesktopButton.Enabled = $false
+                $connectDesktopButton.Enabled = $false
+                $removeDesktopButton.Enabled = $false
+            }
+        } catch {
+            $desktopStatusLabel.Text = "Status unavailable: $($_.Exception.Message)"
+            $desktopStatusLabel.ForeColor = $ui.Bad
+            $discoverDesktopButton.Enabled = $false
+            $connectDesktopButton.Enabled = $false
+            $removeDesktopButton.Enabled = $false
+        }
+    }
+    & $refreshDesktopStatus
+
     $setBusy = {
         param([bool]$Busy, [string]$Status)
         $runButton.Enabled = -not $Busy
@@ -5160,6 +5591,16 @@ Status log
         $checkTailscaleButton.Enabled = -not $Busy
         $repairTailscaleButton.Enabled = -not $Busy
         $removeTailscaleButton.Enabled = -not $Busy
+        $installDesktopButton.Enabled = -not $Busy
+        $desktopProjectButton.Enabled = -not $Busy
+        $desktopReleasesButton.Enabled = -not $Busy
+        if ($Busy) {
+            $discoverDesktopButton.Enabled = $false
+            $connectDesktopButton.Enabled = $false
+            $removeDesktopButton.Enabled = $false
+        } else {
+            & $refreshDesktopStatus
+        }
         $refreshMacButton.Enabled = -not $Busy
         $generateMacButton.Enabled = -not $Busy
         $applyMacButton.Enabled = -not $Busy
@@ -5184,6 +5625,66 @@ Status log
         $statusLabel.Text = $Status
         [Windows.Forms.Application]::DoEvents()
     }
+
+    $installDesktopButton.Add_Click({
+        try {
+            & $setBusy $true "Installing JetKVM Desktop..."
+            $installedState = Install-JetKvmDesktopClient -Log $log
+            & $setBusy $false "JetKVM Desktop $($installedState.Version) ready"
+            [Windows.Forms.MessageBox]::Show(
+                "JetKVM Desktop $($installedState.Version) is installed and ready. Use Discover JetKVMs or Connect to Setup address.",
+                "JetKVM Desktop",
+                "OK",
+                "Information"
+            ) | Out-Null
+        } catch {
+            & $log ("ERROR: " + $_.Exception.Message)
+            & $setBusy $false "Desktop client install failed"
+            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetKVM Desktop", "OK", "Error") | Out-Null
+        }
+    })
+    $discoverDesktopButton.Add_Click({
+        try {
+            Start-JetKvmDesktopClient
+            & $log "Opened JetKVM Desktop discovery."
+        } catch {
+            & $log ("ERROR: " + $_.Exception.Message)
+            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetKVM Desktop", "OK", "Error") | Out-Null
+        }
+    })
+    $connectDesktopButton.Add_Click({
+        try {
+            $address = $ipBox.Text.Trim()
+            if ([string]::IsNullOrWhiteSpace($address)) {
+                throw "Enter a JetKVM address on the Setup tab first, or use Discover JetKVMs."
+            }
+            Start-JetKvmDesktopClient -JetKvmAddress $address
+            & $log "Opened JetKVM Desktop for $address."
+        } catch {
+            & $log ("ERROR: " + $_.Exception.Message)
+            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetKVM Desktop", "OK", "Error") | Out-Null
+        }
+    })
+    $removeDesktopButton.Add_Click({
+        try {
+            $answer = [Windows.Forms.MessageBox]::Show(
+                "Remove the JetFUEL-managed JetKVM Desktop client? This does not change any JetKVM device or SSH key.",
+                "Remove JetKVM Desktop",
+                "YesNo",
+                "Warning"
+            )
+            if ($answer -ne [Windows.Forms.DialogResult]::Yes) { return }
+            & $setBusy $true "Removing JetKVM Desktop..."
+            Remove-JetKvmDesktopClient -Log $log
+            & $setBusy $false "JetKVM Desktop removed"
+        } catch {
+            & $log ("ERROR: " + $_.Exception.Message)
+            & $setBusy $false "Desktop client removal failed"
+            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetKVM Desktop", "OK", "Error") | Out-Null
+        }
+    })
+    $desktopProjectButton.Add_Click({ Start-Process "https://github.com/lkarlslund/jetkvm-desktop/" })
+    $desktopReleasesButton.Add_Click({ Start-Process "https://github.com/lkarlslund/jetkvm-desktop/releases" })
 
     $setIndicator = {
         param(
