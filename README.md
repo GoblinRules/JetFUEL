@@ -47,6 +47,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\JetFuel.ps1
 - Supports clean Tailscale installs.
 - Provides Tailscale check, repair, and remove actions.
 - Checks and repairs the JetKVM Tailscale boot hook at `/userdata/init.d/S22tailscale`.
+- Provides a Desktop tab that installs, updates, verifies, launches, and removes the community JetKVM Desktop companion client.
 - Provides a Diagnostics tab for health checks, D-state process detection, JetKVM app/crash logs, saveable support reports, reboot tools, OTA access, and guarded DFU recovery resources.
 - Keeps colour-coded logs and a copy-log button.
 - Provides an Identity tab for JetKVM MAC status, generated local-administered MAC profiles, custom MAC override, and clearing the user override.
@@ -128,6 +129,18 @@ Useful vendor resources:
 
 After Tailscale is online, you can remove the SSH public key from JetKVM or disable Developer Mode again if you do not need SSH access.
 
+## JetKVM Desktop Companion
+
+The `Desktop` tab integrates [jetkvm-desktop](https://github.com/lkarlslund/jetkvm-desktop/), a separate community native client by Lars Karlslund.
+
+- `Install / update` downloads the latest `jetkvm-desktop-windows-amd64.zip` release from the fixed upstream GitHub repository, verifies GitHub's published SHA-256 digest and required runtime files, and installs it under `%LOCALAPPDATA%\JetFUEL\tools\jetkvm-desktop`.
+- If an upstream Windows package omits its known MinGW runtime files, JetFUEL can supply matching x64 copies from the local Git for Windows installation used by the setup workflow. Architecture and completeness are checked before an existing managed installation is changed.
+- `Discover JetKVMs` launches the client without an address so it can discover local devices.
+- `Connect to Setup address` passes the JetKVM hostname or IP from the Setup tab to the client.
+- `Remove client` removes only JetFUEL's managed copy.
+
+JetFUEL does not collect or store the JetKVM password used by this client. Authentication prompts remain inside the separate desktop client. JetKVM Desktop is MIT licensed and is not bundled with this repository; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
 ## Installer Script Sources
 
 The `Install script` field in Deployment details lets you choose which install script to use:
@@ -207,6 +220,7 @@ Use the red `EXIT` button in the wizard header when you are finished.
 
 - `No` exits only.
 - `Yes` removes JetFUEL temp folders and the downloaded `%LOCALAPPDATA%\JetFUEL` bootstrap copy when present.
+- This cleanup also removes a JetFUEL-managed JetKVM Desktop client stored below `%LOCALAPPDATA%\JetFUEL\tools`.
 - SSH keys are left in place.
 - Git for Windows / Git Bash is only uninstalled after a second confirmation because other tools may depend on it.
 

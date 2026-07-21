@@ -12,6 +12,8 @@ $downloads = @(
     @{ Uri = "$BaseUrl/JetFuel.ps1"; OutFile = $target },
     @{ Uri = "$BaseUrl/install-tailscale.sh"; OutFile = (Join-Path $targetDir "install-tailscale.sh") },
     @{ Uri = "$BaseUrl/install-tailscale.metadata.json"; OutFile = (Join-Path $targetDir "install-tailscale.metadata.json") },
+    @{ Uri = "$BaseUrl/LICENSE"; OutFile = (Join-Path $targetDir "LICENSE") },
+    @{ Uri = "$BaseUrl/THIRD_PARTY_NOTICES.md"; OutFile = (Join-Path $targetDir "THIRD_PARTY_NOTICES.md") },
     @{ Uri = "$BaseUrl/assets/icon.ico"; OutFile = (Join-Path $targetDir "assets\icon.ico") },
     @{ Uri = "$BaseUrl/assets/icon.png"; OutFile = (Join-Path $targetDir "assets\icon.png") },
     @{ Uri = "$BaseUrl/third_party/ConfigJon-Firmware-Management/metadata.json"; OutFile = (Join-Path $targetDir "third_party\ConfigJon-Firmware-Management\metadata.json") },
