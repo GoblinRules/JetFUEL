@@ -14,6 +14,8 @@ try {
 public static extern int SetProcessDpiAwareness(int value);
 [DllImport("user32.dll")]
 public static extern bool SetProcessDPIAware();
+[DllImport("kernel32.dll")]
+public static extern uint SetErrorMode(uint uMode);
 '@
     # 1 = PROCESS_SYSTEM_DPI_AWARE. Fails harmlessly when awareness was already set.
     if ([JetFuel.DpiNative]::SetProcessDpiAwareness(1) -ne 0) {
@@ -597,28 +599,51 @@ function Test-JetKvmDesktopRuntimeDependencies {
     param([Parameter(Mandatory)][string]$ExecutablePath)
 
     if (-not (Test-Path -LiteralPath $ExecutablePath)) {
-        return [pscustomobject]@{ Ready = $false; Missing = @("jetkvm-desktop.exe") }
+        return [pscustomobject]@{
+            Ready = $false
+            Missing = @("jetkvm-desktop.exe")
+            Invalid = @()
+        }
     }
 
-    # Current upstream releases are intended to be statically linked. Detect the
-    # MinGW imports that made v0.2.0 unusable on a normal Windows installation.
+    # Follow the private MinGW dependency chain recursively. A system-wide DLL is
+    # deliberately not accepted because an incompatible copy can cause 0xc000007b.
     $knownRuntimeDlls = @("libgcc_s_seh-1.dll", "libstdc++-6.dll", "libwinpthread-1.dll", "libssp-0.dll")
-    $binaryText = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($ExecutablePath))
     $executableDirectory = Split-Path -Parent $ExecutablePath
-    $systemDirectory = [Environment]::SystemDirectory
-    $missing = @()
-    foreach ($dllName in $knownRuntimeDlls) {
-        if ($binaryText.IndexOf($dllName, [StringComparison]::OrdinalIgnoreCase) -lt 0) { continue }
-        $besideExecutable = Join-Path $executableDirectory $dllName
-        $inSystemDirectory = Join-Path $systemDirectory $dllName
-        if (-not (Test-Path -LiteralPath $besideExecutable) -and -not (Test-Path -LiteralPath $inSystemDirectory)) {
-            $missing += $dllName
+    $expectedMachine = 0x8664
+    $missing = New-Object Collections.Generic.List[string]
+    $invalid = New-Object Collections.Generic.List[string]
+    $pending = New-Object Collections.Queue
+    $visited = @{}
+    $pending.Enqueue($ExecutablePath)
+
+    while ($pending.Count -gt 0) {
+        $binaryPath = [string]$pending.Dequeue()
+        $binaryName = Split-Path -Leaf $binaryPath
+        if ($visited.ContainsKey($binaryName)) { continue }
+        $visited[$binaryName] = $true
+
+        if ((Get-PeMachineCode -Path $binaryPath) -ne $expectedMachine) {
+            if (-not $invalid.Contains($binaryName)) { $invalid.Add($binaryName) }
+            continue
+        }
+
+        $binaryText = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($binaryPath))
+        foreach ($dllName in $knownRuntimeDlls) {
+            if ($binaryText.IndexOf($dllName, [StringComparison]::OrdinalIgnoreCase) -lt 0) { continue }
+            $localDll = Join-Path $executableDirectory $dllName
+            if (-not (Test-Path -LiteralPath $localDll)) {
+                if (-not $missing.Contains($dllName)) { $missing.Add($dllName) }
+                continue
+            }
+            $pending.Enqueue($localDll)
         }
     }
 
     return [pscustomobject]@{
-        Ready = $missing.Count -eq 0
+        Ready = ($missing.Count -eq 0) -and ($invalid.Count -eq 0)
         Missing = @($missing)
+        Invalid = @($invalid)
     }
 }
 
@@ -647,34 +672,77 @@ function Add-JetKvmDesktopRuntimeDependencies {
         [scriptblock]$Log
     )
 
-    $runtime = Test-JetKvmDesktopRuntimeDependencies -ExecutablePath $ExecutablePath
-    if ($runtime.Ready) { return @() }
-
-    $gitInfo = Get-GitForWindowsInstallInfo
-    if (-not $gitInfo) {
-        throw "The upstream JetKVM Desktop Windows package requires $($runtime.Missing -join ', ') but does not include them. Run Setup preflight and install Git for Windows, then retry, or wait for a corrected upstream release."
-    }
-    $gitRuntimeDirectory = Join-Path $gitInfo.Root "mingw64\bin"
     $executableMachine = Get-PeMachineCode -Path $ExecutablePath
     if ($executableMachine -ne 0x8664) {
         throw "The downloaded JetKVM Desktop executable is not the expected Windows x64 build."
     }
 
+    $runtime = Test-JetKvmDesktopRuntimeDependencies -ExecutablePath $ExecutablePath
+    if ($runtime.Ready) { return @() }
+    $gitInfo = Get-GitForWindowsInstallInfo
+    if (-not $gitInfo) {
+        throw "The upstream JetKVM Desktop Windows package needs private MinGW runtime files, but Git for Windows is unavailable. Run Setup preflight and install Git for Windows, then retry."
+    }
+    $gitRuntimeDirectory = Join-Path $gitInfo.Root "mingw64\bin"
     $copied = @()
-    foreach ($dllName in $runtime.Missing) {
-        $source = Join-Path $gitRuntimeDirectory $dllName
-        if (-not (Test-Path -LiteralPath $source)) { continue }
-        if ((Get-PeMachineCode -Path $source) -ne $executableMachine) { continue }
-        Copy-Item -LiteralPath $source -Destination (Split-Path -Parent $ExecutablePath) -Force -ErrorAction Stop
-        $copied += $dllName
-        if ($Log) { & $Log "[OK] Added $dllName from the local Git for Windows x64 runtime." }
+    for ($pass = 0; $pass -lt 5; $pass++) {
+        $runtime = Test-JetKvmDesktopRuntimeDependencies -ExecutablePath $ExecutablePath
+        if ($runtime.Ready) { break }
+        $required = @($runtime.Missing) + @($runtime.Invalid | Where-Object { $_ -ne "jetkvm-desktop.exe" })
+        $copiedThisPass = 0
+        foreach ($dllName in ($required | Select-Object -Unique)) {
+            $source = Join-Path $gitRuntimeDirectory $dllName
+            if (-not (Test-Path -LiteralPath $source)) { continue }
+            if ((Get-PeMachineCode -Path $source) -ne $executableMachine) { continue }
+            Copy-Item -LiteralPath $source -Destination (Split-Path -Parent $ExecutablePath) -Force -ErrorAction Stop
+            $copied += $dllName
+            $copiedThisPass++
+            if ($Log) { & $Log "[OK] Added $dllName from the local Git for Windows x64 runtime." }
+        }
+        if ($copiedThisPass -eq 0) { break }
     }
 
     $runtime = Test-JetKvmDesktopRuntimeDependencies -ExecutablePath $ExecutablePath
     if (-not $runtime.Ready) {
-        throw "The upstream JetKVM Desktop Windows package is missing required runtime files: $($runtime.Missing -join ', '). JetFUEL could not obtain matching x64 files from the local Git for Windows installation."
+        $problems = @($runtime.Missing) + @($runtime.Invalid | ForEach-Object { "$_ (wrong architecture or invalid)" })
+        throw "The upstream JetKVM Desktop Windows package has unusable runtime files: $($problems -join ', '). JetFUEL could not obtain a complete matching x64 runtime from Git for Windows."
     }
-    return @($copied)
+    return @($copied | Select-Object -Unique)
+}
+
+function Test-JetKvmDesktopLaunch {
+    param([Parameter(Mandatory)][string]$ExecutablePath)
+
+    $startInfo = New-Object Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $ExecutablePath
+    $startInfo.Arguments = "--help"
+    $startInfo.WorkingDirectory = Split-Path -Parent $ExecutablePath
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $process = New-Object Diagnostics.Process
+    $process.StartInfo = $startInfo
+    $previousErrorMode = $null
+    try {
+        # Suppress Windows loader popups during the smoke test. A failure is
+        # returned as an exit code and surfaced by JetFUEL instead.
+        try { $previousErrorMode = [JetFuel.DpiNative]::SetErrorMode(0x0003) } catch {}
+        if (-not $process.Start()) { throw "Windows did not start the executable." }
+        if (-not $process.WaitForExit(10000)) {
+            try { $process.Kill() } catch {}
+            throw "The Web UI loader check did not finish within 10 seconds."
+        }
+        if ($process.ExitCode -ne 0) {
+            $exitHex = ('0x{0:X8}' -f $process.ExitCode)
+            throw "Windows could not load the Web UI executable (exit $exitHex). Reinstall Git for Windows x64, then retry the Web UI installation."
+        }
+    } finally {
+        $process.Dispose()
+        if ($null -ne $previousErrorMode) {
+            try { [void][JetFuel.DpiNative]::SetErrorMode([uint32]$previousErrorMode) } catch {}
+        }
+    }
 }
 
 function Install-JetKvmDesktopClient {
@@ -701,6 +769,8 @@ function Install-JetKvmDesktopClient {
             throw "The verified JetKVM Desktop archive did not contain jetkvm-desktop.exe."
         }
         $runtimeFiles = @(Add-JetKvmDesktopRuntimeDependencies -ExecutablePath $executable.FullName -Log $Log)
+        Test-JetKvmDesktopLaunch -ExecutablePath $executable.FullName
+        if ($Log) { & $Log "[OK] Web UI loader smoke test passed." }
         if (Test-Path -LiteralPath $state.Root) {
             Remove-Item -LiteralPath $state.Root -Recurse -Force -ErrorAction Stop
         }
@@ -787,7 +857,8 @@ function Start-JetKvmDesktopClient {
     }
     $runtime = Test-JetKvmDesktopRuntimeDependencies -ExecutablePath $state.Executable
     if (-not $runtime.Ready) {
-        throw "The managed Web UI cannot start because these runtime files are missing: $($runtime.Missing -join ', '). Use Update / reinstall on the Web UI tab, or uninstall it."
+        $problems = @($runtime.Missing) + @($runtime.Invalid | ForEach-Object { "$_ (invalid x64 runtime)" })
+        throw "The managed Web UI cannot start because its private runtime is incomplete: $($problems -join ', '). Use Update / reinstall on the Web UI tab."
     }
     if (-not [string]::IsNullOrWhiteSpace($JetKvmAddress)) {
         Assert-ValidIpOrHost -Value $JetKvmAddress
@@ -5623,7 +5694,8 @@ Status log
                     $discoverDesktopButton.Enabled = $true
                     $connectDesktopButton.Enabled = $true
                 } else {
-                    $desktopStatusLabel.Text = "Installed but unusable - missing: $($runtime.Missing -join ', ')"
+                    $runtimeProblems = @($runtime.Missing) + @($runtime.Invalid | ForEach-Object { "$_ (invalid)" })
+                    $desktopStatusLabel.Text = "Installed but unusable: $($runtimeProblems -join ', ')"
                     $desktopStatusLabel.ForeColor = $ui.Bad
                     $discoverDesktopButton.Enabled = $false
                     $connectDesktopButton.Enabled = $false
