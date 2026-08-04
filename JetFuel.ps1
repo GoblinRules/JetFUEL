@@ -2025,23 +2025,105 @@ printf 'JETFUEL_INVENTORY_CLOUD_STATE=%s\n' "$(clean_value "$cloud_state")"
     }
 }
 
+function Get-LocalWindowsInventory {
+    $unavailable = "Unavailable"
+    $pc = $null
+    $bios = $null
+    $cpu = $null
+    $nic = $null
+    $networkAdapters = @()
+
+    try { $pc = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop } catch {}
+    try { $bios = Get-CimInstance Win32_BIOS -ErrorAction Stop } catch {}
+    try { $cpu = Get-CimInstance Win32_Processor -ErrorAction Stop | Select-Object -First 1 } catch {}
+    try { $networkAdapters = @(Get-CimInstance Win32_NetworkAdapter -ErrorAction Stop) } catch {}
+    try {
+        $adaptersByIndex = @{}
+        foreach ($adapter in $networkAdapters) {
+            $adaptersByIndex[[string]$adapter.Index] = $adapter
+        }
+
+        $nic = Get-CimInstance Win32_NetworkAdapterConfiguration -ErrorAction Stop |
+            Where-Object { $_.IPEnabled -eq $true -and -not [string]::IsNullOrWhiteSpace([string]$_.MACAddress) } |
+            Sort-Object @{ Expression = {
+                    $adapter = $adaptersByIndex[[string]$_.Index]
+                    $pnpId = if ($adapter -and $adapter.PNPDeviceID) { [string]$adapter.PNPDeviceID } else { "" }
+                    if ($pnpId -like 'PCI\*' -or $pnpId -like 'USB\*') { 0 }
+                    elseif ($adapter -and $adapter.PhysicalAdapter -eq $true) { 1 }
+                    else { 2 }
+                }
+            }, @{ Expression = { if (@($_.DefaultIPGateway).Count -gt 0) { 0 } else { 1 } } }, Index |
+            Select-Object -First 1
+    } catch {}
+
+    $ramGb = $unavailable
+    if ($pc -and $pc.TotalPhysicalMemory) {
+        $ramGb = [math]::Round(([double]$pc.TotalPhysicalMemory / 1GB), 2)
+    }
+
+    $externalIp = $unavailable
+    try {
+        $ipResult = Invoke-RestMethod -UseBasicParsing -Uri "https://api.ipify.org?format=json" -TimeoutSec 12 -ErrorAction Stop
+        if ($ipResult -and -not [string]::IsNullOrWhiteSpace([string]$ipResult.ip)) {
+            $externalIp = ([string]$ipResult.ip).Trim()
+        }
+    } catch {}
+
+    function Get-LocalInventoryValue($Value) {
+        if ($null -ne $Value -and -not [string]::IsNullOrWhiteSpace([string]$Value)) {
+            return ([string]$Value).Trim()
+        }
+        return $unavailable
+    }
+
+    return [pscustomobject][ordered]@{
+        PcName = Get-LocalInventoryValue $(if ($pc) { $pc.Name } else { $null })
+        PcMake = Get-LocalInventoryValue $(if ($pc) { $pc.Manufacturer } else { $null })
+        PcModel = Get-LocalInventoryValue $(if ($pc) { $pc.Model } else { $null })
+        SerialNumber = Get-LocalInventoryValue $(if ($bios) { $bios.SerialNumber } else { $null })
+        MacAddress = Get-LocalInventoryValue $(if ($nic) { $nic.MACAddress } else { $null })
+        Cpu = Get-LocalInventoryValue $(if ($cpu) { $cpu.Name } else { $null })
+        RamGb = $ramGb
+        ExternalIp = $externalIp
+    }
+}
+
 function Format-JetKvmInventoryReport {
     param([Parameter(Mandatory)]$Inventory)
 
-    return (@(
-        "JetFUEL JetKVM inventory",
+    $report = @(
+        "JetFUEL deployment inventory",
         "Generated: $($Inventory.CollectedAt.ToString('yyyy-MM-dd HH:mm:ss zzz'))",
         "JetKVM address: $($Inventory.JetKvmAddress)",
         "",
+        "JETKVM DEVICE",
         "KVM Make: $($Inventory.KvmMake)",
         "KVM Model/Version: $($Inventory.KvmModelVersion)",
-        "Serial Number: $($Inventory.SerialNumber)",
-        "MAC: $($Inventory.MacAddress)",
+        "KVM Serial Number: $($Inventory.SerialNumber)",
+        "KVM MAC: $($Inventory.MacAddress)",
         "Hostname: $($Inventory.Hostname)",
         "Tailscale Name: $($Inventory.TailscaleName)",
         "Cloud Configured State: $($Inventory.CloudConfiguredState)",
         ""
-    ) -join [Environment]::NewLine)
+    )
+
+    if ($Inventory.LocalComputer) {
+        $local = $Inventory.LocalComputer
+        $report += @(
+            "LOCAL WINDOWS PC",
+            "PC Name: $($local.PcName)",
+            "PC Make: $($local.PcMake)",
+            "PC Model: $($local.PcModel)",
+            "PC Serial Number: $($local.SerialNumber)",
+            "PC MAC: $($local.MacAddress)",
+            "CPU: $($local.Cpu)",
+            "RAM (GB): $($local.RamGb)",
+            "External IP: $($local.ExternalIp)",
+            ""
+        )
+    }
+
+    return ($report -join [Environment]::NewLine)
 }
 
 function Save-JetKvmInventoryReportToDesktop {
@@ -4608,7 +4690,7 @@ function Start-JetFuelGuiV2 {
     $inventoryPage = [Windows.Forms.Panel]::new()
     $inventoryPage.Dock = "Fill"
     $inventoryPage.BackColor = $ui.Window
-    $inventoryPage.AutoScroll = $false
+    $inventoryPage.AutoScroll = $true
 
     $setupLayout = [Windows.Forms.TableLayoutPanel]::new()
     $setupLayout.Dock = "Top"
@@ -4850,9 +4932,10 @@ Status log
 - Drag the splitter above the log to make it larger or smaller.
 
 Inventory tab
-- Uses the Setup tab JetKVM address and SSH key to collect a concise device record.
-- Collect and save reads the JetKVM make, model/app/system versions, hardware serial, Ethernet MAC, hostname, Tailscale name, and cloud-configured state.
-- A timestamped text report is saved automatically to the Windows Desktop. Cloud credentials, auth keys, passwords, and SSH key contents are never included.
+- Uses the Setup tab JetKVM address and SSH key to collect a concise device record, then reads this Windows PC's make/model, serial, primary active physical-adapter MAC, CPU, RAM, and external IP.
+- Collect and save displays both sections and writes one timestamped text report automatically to the Windows Desktop.
+- The external-IP lookup uses api.ipify.org with a short timeout. If it is unavailable, the remaining inventory is still displayed and saved.
+- Reports include device and network identifiers. Review them before sharing. Cloud credentials, auth keys, passwords, and SSH key contents are never included.
 - Copy details copies the displayed report. Open saved report opens the most recently generated text file.
 "@
     $helpPage.Controls.Add($helpBox)
@@ -5410,22 +5493,22 @@ Inventory tab
     $diagnosticsPage.Add_VisibleChanged({ if ($diagnosticsPage.Visible) { & $resizeDiagnosticText } })
     & $resizeDiagnosticText
 
-    $inventoryGroup = New-Group "JetKVM device inventory"
+    $inventoryGroup = New-Group "JetKVM and local PC inventory"
     & $makeGroupAutoHeight $inventoryGroup
     $inventoryGrid = [Windows.Forms.TableLayoutPanel]::new()
     $inventoryGrid.Dock = "Top"
     $inventoryGrid.AutoSize = $true
     $inventoryGrid.AutoSizeMode = [Windows.Forms.AutoSizeMode]::GrowAndShrink
     $inventoryGrid.ColumnCount = 2
-    $inventoryGrid.RowCount = 10
+    $inventoryGrid.RowCount = 20
     $inventoryGrid.Padding = New-ScaledPadding 10 7 10 8
     $inventoryGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, (S 190))) | Out-Null
     $inventoryGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
-    for ($i = 0; $i -lt 10; $i++) {
+    for ($i = 0; $i -lt 20; $i++) {
         $inventoryGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::AutoSize)) | Out-Null
     }
 
-    $inventoryIntro = New-RowLabel "Collects a non-secret device record using the Setup address and Developer Mode SSH key, then saves it automatically to your Windows Desktop."
+    $inventoryIntro = New-RowLabel "Collects the JetKVM identity plus this Windows PC's hardware summary, displays both below, then saves a timestamped report to your Desktop."
     $inventoryIntro.AutoSize = $true
     $inventoryIntro.Dock = "Top"
     $inventoryIntro.Padding = New-ScaledPadding 0 2 0 5
@@ -5481,12 +5564,46 @@ Inventory tab
         $rowIndex++
     }
 
+    $localInventoryTitle = New-RowLabel "Local Windows PC"
+    $localInventoryTitle.Font = [Drawing.Font]::new("Segoe UI", 10, [Drawing.FontStyle]::Bold)
+    $localInventoryTitle.ForeColor = $ui.Info
+    $localInventoryTitle.Padding = New-ScaledPadding 0 9 0 3
+    $inventoryGrid.Controls.Add($localInventoryTitle, 0, 9)
+    $inventoryGrid.SetColumnSpan($localInventoryTitle, 2)
+
+    $localInventoryRows = [ordered]@{
+        "PC Name" = New-InventoryValueLabel
+        "PC Make" = New-InventoryValueLabel
+        "PC Model" = New-InventoryValueLabel
+        "PC Serial Number" = New-InventoryValueLabel
+        "PC MAC" = New-InventoryValueLabel
+        "CPU" = New-InventoryValueLabel
+        "RAM (GB)" = New-InventoryValueLabel
+        "External IP" = New-InventoryValueLabel
+    }
+    $rowIndex = 10
+    foreach ($entry in $localInventoryRows.GetEnumerator()) {
+        $nameLabel = New-RowLabel $entry.Key
+        $nameLabel.ForeColor = $ui.Muted
+        $inventoryGrid.Controls.Add($nameLabel, 0, $rowIndex)
+        $inventoryGrid.Controls.Add($entry.Value, 1, $rowIndex)
+        $rowIndex++
+    }
+
+    $inventoryPrivacyLabel = New-RowLabel "Privacy: the saved report includes local and external IP-related identifiers. Review it before sharing. External IP lookup uses api.ipify.org and is skipped gracefully if unavailable."
+    $inventoryPrivacyLabel.AutoSize = $true
+    $inventoryPrivacyLabel.Dock = "Top"
+    $inventoryPrivacyLabel.ForeColor = $ui.Warn
+    $inventoryPrivacyLabel.Padding = New-ScaledPadding 0 7 0 1
+    $inventoryGrid.Controls.Add($inventoryPrivacyLabel, 0, 18)
+    $inventoryGrid.SetColumnSpan($inventoryPrivacyLabel, 2)
+
     $inventoryPathLabel = New-RowLabel "No report has been generated yet."
     $inventoryPathLabel.AutoSize = $true
     $inventoryPathLabel.Dock = "Top"
     $inventoryPathLabel.ForeColor = $ui.Muted
     $inventoryPathLabel.Padding = New-ScaledPadding 0 6 0 1
-    $inventoryGrid.Controls.Add($inventoryPathLabel, 0, 9)
+    $inventoryGrid.Controls.Add($inventoryPathLabel, 0, 19)
     $inventoryGrid.SetColumnSpan($inventoryPathLabel, 2)
     $inventoryGroup.Controls.Add($inventoryGrid)
     $inventoryPage.Controls.Add($inventoryGroup)
@@ -5497,6 +5614,7 @@ Inventory tab
     }
     $resizeInventoryIntro = {
         $inventoryIntro.MaximumSize = [Drawing.Size]::new([Math]::Max((S 360), $inventoryPage.ClientSize.Width - (S 60)), 0)
+        $inventoryPrivacyLabel.MaximumSize = [Drawing.Size]::new([Math]::Max((S 360), $inventoryPage.ClientSize.Width - (S 60)), 0)
     }
     $inventoryPage.Add_SizeChanged({ & $resizeInventoryIntro })
     $inventoryPage.Add_VisibleChanged({ if ($inventoryPage.Visible) { & $resizeInventoryIntro } })
@@ -6746,6 +6864,9 @@ Inventory tab
             & $log "--- Collecting JetKVM device inventory ---"
 
             $inventory = Get-JetKvmInventory -JetKvmAddress $target.Ip -KeyPath $target.KeyPath
+            & $log "--- Collecting local Windows PC inventory ---"
+            $localInventory = Get-LocalWindowsInventory
+            $inventory | Add-Member -MemberType NoteProperty -Name LocalComputer -Value $localInventory
             $reportPath = Save-JetKvmInventoryReportToDesktop -Inventory $inventory
             $inventoryState.Data = $inventory
             $inventoryState.ReportPath = $reportPath
@@ -6758,6 +6879,14 @@ Inventory tab
             $inventoryRows["Tailscale Name"].Text = $inventory.TailscaleName
             $inventoryRows["Cloud Configured State"].Text = $inventory.CloudConfiguredState
             $inventoryRows["Cloud Configured State"].ForeColor = if ($inventory.CloudConfiguredState -eq "Configured") { $ui.Good } else { $ui.Warn }
+            $localInventoryRows["PC Name"].Text = $localInventory.PcName
+            $localInventoryRows["PC Make"].Text = $localInventory.PcMake
+            $localInventoryRows["PC Model"].Text = $localInventory.PcModel
+            $localInventoryRows["PC Serial Number"].Text = $localInventory.SerialNumber
+            $localInventoryRows["PC MAC"].Text = $localInventory.MacAddress
+            $localInventoryRows["CPU"].Text = $localInventory.Cpu
+            $localInventoryRows["RAM (GB)"].Text = [string]$localInventory.RamGb
+            $localInventoryRows["External IP"].Text = $localInventory.ExternalIp
             $inventoryPathLabel.Text = "Saved to: $reportPath"
             $inventoryPathLabel.ForeColor = $ui.Good
 
@@ -6768,12 +6897,16 @@ Inventory tab
             & $log "[OK] Hostname: $($inventory.Hostname)"
             & $log "[OK] Tailscale Name: $($inventory.TailscaleName)"
             & $log "[OK] Cloud Configured State: $($inventory.CloudConfiguredState)"
+            & $log "[OK] Local Windows PC inventory included."
+            if ($localInventory.ExternalIp -eq "Unavailable") {
+                & $log "[WARN] External IP lookup was unavailable; the rest of the inventory was saved."
+            }
             & $log "[OK] Inventory report saved: $reportPath"
             & $setBusy $false "Inventory saved"
 
             [Windows.Forms.MessageBox]::Show(
-                "JetKVM inventory collected and saved to:`r`n`r`n$reportPath",
-                "JetKVM inventory",
+                "JetKVM and local PC inventory collected and saved to:`r`n`r`n$reportPath",
+                "Deployment inventory",
                 "OK",
                 "Information"
             ) | Out-Null
