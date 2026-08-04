@@ -2141,25 +2141,17 @@ function Format-JetKvmInventoryReport {
     return ($report -join [Environment]::NewLine)
 }
 
-function Save-JetKvmInventoryReportToDesktop {
-    param([Parameter(Mandatory)]$Inventory)
+function Save-JetKvmInventoryReport {
+    param(
+        [Parameter(Mandatory)]$Inventory,
+        [Parameter(Mandatory)][string]$Path
+    )
 
-    $desktop = [Environment]::GetFolderPath([Environment+SpecialFolder]::DesktopDirectory)
-    if ([string]::IsNullOrWhiteSpace($desktop) -or -not (Test-Path -LiteralPath $desktop)) {
-        throw "The Windows Desktop folder could not be found."
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        throw "Choose a report file path."
     }
-    $identity = [string]$Inventory.Hostname
-    if ([string]::IsNullOrWhiteSpace($identity) -or $identity -eq "Not available") {
-        $identity = [string]$Inventory.SerialNumber
-    }
-    if ([string]::IsNullOrWhiteSpace($identity) -or $identity -eq "Not available") {
-        $identity = [string]$Inventory.JetKvmAddress
-    }
-    $safeIdentity = ($identity -replace '[^A-Za-z0-9._-]', '_').Trim('_')
-    if ([string]::IsNullOrWhiteSpace($safeIdentity)) { $safeIdentity = "JetKVM" }
-    $path = Join-Path $desktop ("JetFUEL-JetKVM-{0}-{1}.txt" -f $safeIdentity, (Get-Date -Format "yyyyMMdd-HHmmss"))
-    [IO.File]::WriteAllText($path, (Format-JetKvmInventoryReport -Inventory $Inventory), [Text.UTF8Encoding]::new($false))
-    return $path
+    [IO.File]::WriteAllText($Path, (Format-JetKvmInventoryReport -Inventory $Inventory), [Text.UTF8Encoding]::new($false))
+    return $Path
 }
 
 function Get-JetKvmManualAppUpdateCommand {
@@ -4948,10 +4940,10 @@ Status log
 
 Inventory tab
 - Uses the Setup tab JetKVM address and SSH key to collect a concise device record, then reads this Windows PC's make/model, Windows 10/11 edition and build, serial, primary active physical-adapter MAC, CPU, RAM, and external IP.
-- Collect and save displays both sections and writes one timestamped text report automatically to the Windows Desktop.
+- Collect details displays both sections without writing a file. Save report opens a standard Save dialog, and Copy details places the formatted report on the clipboard.
 - The external-IP lookup uses api.ipify.org with a short timeout. If it is unavailable, the remaining inventory is still displayed and saved.
 - Reports include device and network identifiers. Review them before sharing. Cloud credentials, auth keys, passwords, and SSH key contents are never included.
-- Copy details copies the displayed report. Open saved report opens the most recently generated text file.
+- Open saved report becomes available after an explicit save and opens that report.
 "@
     $helpPage.Controls.Add($helpBox)
 
@@ -5523,7 +5515,7 @@ Inventory tab
         $inventoryGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::AutoSize)) | Out-Null
     }
 
-    $inventoryIntro = New-RowLabel "Collects the JetKVM identity plus this Windows PC's hardware summary, displays both below, then saves a timestamped report to your Desktop."
+    $inventoryIntro = New-RowLabel "Collects the JetKVM identity plus this Windows PC's hardware summary and displays both below. Nothing is saved unless you select Save report."
     $inventoryIntro.AutoSize = $true
     $inventoryIntro.Dock = "Top"
     $inventoryIntro.Padding = New-ScaledPadding 0 2 0 5
@@ -5535,12 +5527,14 @@ Inventory tab
     $inventoryActions.AutoSize = $true
     $inventoryActions.AutoSizeMode = [Windows.Forms.AutoSizeMode]::GrowAndShrink
     $inventoryActions.WrapContents = $true
-    $collectInventoryButton = & $newDiagnosticsButton "Collect and save" "Primary" 156
+    $collectInventoryButton = & $newDiagnosticsButton "Collect details" "Primary" 145
+    $saveInventoryButton = & $newDiagnosticsButton "Save report" "Secondary" 125
     $copyInventoryButton = & $newDiagnosticsButton "Copy details" "Secondary" 132
     $openInventoryReportButton = & $newDiagnosticsButton "Open saved report" "Secondary" 156
+    $saveInventoryButton.Enabled = $false
     $copyInventoryButton.Enabled = $false
     $openInventoryReportButton.Enabled = $false
-    $inventoryActions.Controls.AddRange(@($collectInventoryButton, $copyInventoryButton, $openInventoryReportButton))
+    $inventoryActions.Controls.AddRange(@($collectInventoryButton, $saveInventoryButton, $copyInventoryButton, $openInventoryReportButton))
     $inventoryGrid.Controls.Add($inventoryActions, 0, 1)
     $inventoryGrid.SetColumnSpan($inventoryActions, 2)
 
@@ -5614,7 +5608,7 @@ Inventory tab
     $inventoryGrid.Controls.Add($inventoryPrivacyLabel, 0, 19)
     $inventoryGrid.SetColumnSpan($inventoryPrivacyLabel, 2)
 
-    $inventoryPathLabel = New-RowLabel "No report has been generated yet."
+    $inventoryPathLabel = New-RowLabel "Not collected. Use Collect details, then choose Save report or Copy details."
     $inventoryPathLabel.AutoSize = $true
     $inventoryPathLabel.Dock = "Top"
     $inventoryPathLabel.ForeColor = $ui.Muted
@@ -6445,6 +6439,7 @@ Inventory tab
             $diagnosticButton.Enabled = -not $Busy
         }
         $collectInventoryButton.Enabled = -not $Busy
+        $saveInventoryButton.Enabled = (-not $Busy) -and ($null -ne $inventoryState.Data)
         $copyInventoryButton.Enabled = (-not $Busy) -and ($null -ne $inventoryState.Data)
         $openInventoryReportButton.Enabled = (-not $Busy) -and -not [string]::IsNullOrWhiteSpace([string]$inventoryState.ReportPath)
         $exitButton.Enabled = -not $Busy
@@ -6883,9 +6878,8 @@ Inventory tab
             & $log "--- Collecting local Windows PC inventory ---"
             $localInventory = Get-LocalWindowsInventory
             $inventory | Add-Member -MemberType NoteProperty -Name LocalComputer -Value $localInventory
-            $reportPath = Save-JetKvmInventoryReportToDesktop -Inventory $inventory
             $inventoryState.Data = $inventory
-            $inventoryState.ReportPath = $reportPath
+            $inventoryState.ReportPath = $null
 
             $inventoryRows["KVM Make"].Text = $inventory.KvmMake
             $inventoryRows["KVM Model / Version"].Text = $inventory.KvmModelVersion
@@ -6904,8 +6898,8 @@ Inventory tab
             $localInventoryRows["CPU"].Text = $localInventory.Cpu
             $localInventoryRows["RAM (GB)"].Text = [string]$localInventory.RamGb
             $localInventoryRows["External IP"].Text = $localInventory.ExternalIp
-            $inventoryPathLabel.Text = "Saved to: $reportPath"
-            $inventoryPathLabel.ForeColor = $ui.Good
+            $inventoryPathLabel.Text = "Collected. Use Save report or Copy details; no file has been written."
+            $inventoryPathLabel.ForeColor = $ui.Info
 
             & $log "[OK] KVM Make: $($inventory.KvmMake)"
             & $log "[OK] KVM Model/Version: $($inventory.KvmModelVersion)"
@@ -6916,21 +6910,56 @@ Inventory tab
             & $log "[OK] Cloud Configured State: $($inventory.CloudConfiguredState)"
             & $log "[OK] Local Windows PC inventory included."
             if ($localInventory.ExternalIp -eq "Unavailable") {
-                & $log "[WARN] External IP lookup was unavailable; the rest of the inventory was saved."
+                & $log "[WARN] External IP lookup was unavailable; the rest of the inventory was collected."
             }
-            & $log "[OK] Inventory report saved: $reportPath"
-            & $setBusy $false "Inventory saved"
-
-            [Windows.Forms.MessageBox]::Show(
-                "JetKVM and local PC inventory collected and saved to:`r`n`r`n$reportPath",
-                "Deployment inventory",
-                "OK",
-                "Information"
-            ) | Out-Null
+            & $log "[OK] Inventory collected. No file was saved automatically."
+            & $setBusy $false "Inventory collected"
         } catch {
             & $log ("ERROR: " + $_.Exception.Message)
             & $setBusy $false "Inventory failed"
             [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetKVM inventory", "OK", "Error") | Out-Null
+        }
+    })
+
+    $saveInventoryButton.Add_Click({
+        try {
+            if ($null -eq $inventoryState.Data) {
+                throw "Collect the inventory first."
+            }
+
+            $identity = [string]$inventoryState.Data.Hostname
+            if ([string]::IsNullOrWhiteSpace($identity) -or $identity -eq "Not available") {
+                $identity = [string]$inventoryState.Data.SerialNumber
+            }
+            if ([string]::IsNullOrWhiteSpace($identity) -or $identity -eq "Not available") {
+                $identity = [string]$inventoryState.Data.JetKvmAddress
+            }
+            $safeIdentity = ($identity -replace '[^A-Za-z0-9._-]', '_').Trim('_')
+            if ([string]::IsNullOrWhiteSpace($safeIdentity)) { $safeIdentity = "JetKVM" }
+
+            $saveDialog = [Windows.Forms.SaveFileDialog]::new()
+            $saveDialog.Title = "Save deployment inventory"
+            $saveDialog.Filter = "Text files (*.txt)|*.txt|All files (*.*)|*.*"
+            $saveDialog.DefaultExt = "txt"
+            $saveDialog.AddExtension = $true
+            $saveDialog.FileName = "JetFUEL-JetKVM-{0}-{1}.txt" -f $safeIdentity, (Get-Date -Format "yyyyMMdd-HHmmss")
+            $desktop = [Environment]::GetFolderPath([Environment+SpecialFolder]::DesktopDirectory)
+            if (-not [string]::IsNullOrWhiteSpace($desktop) -and (Test-Path -LiteralPath $desktop)) {
+                $saveDialog.InitialDirectory = $desktop
+            }
+            if ($saveDialog.ShowDialog($form) -ne [Windows.Forms.DialogResult]::OK) {
+                return
+            }
+
+            $reportPath = Save-JetKvmInventoryReport -Inventory $inventoryState.Data -Path $saveDialog.FileName
+            $inventoryState.ReportPath = $reportPath
+            $inventoryPathLabel.Text = "Saved to: $reportPath"
+            $inventoryPathLabel.ForeColor = $ui.Good
+            $openInventoryReportButton.Enabled = $true
+            & $log "[OK] Inventory report saved: $reportPath"
+        } catch {
+            & $log ("ERROR: " + $_.Exception.Message)
+            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "Deployment inventory", "OK", "Error") | Out-Null
         }
     })
 
@@ -6951,7 +6980,7 @@ Inventory tab
         try {
             $reportPath = [string]$inventoryState.ReportPath
             if ([string]::IsNullOrWhiteSpace($reportPath) -or -not (Test-Path -LiteralPath $reportPath)) {
-                throw "Collect the JetKVM inventory first, or collect it again if the saved report was moved."
+                throw "Save the inventory report first, or save it again if the previous report was moved."
             }
             Start-Process -FilePath $reportPath
             & $log "Opened inventory report: $reportPath"

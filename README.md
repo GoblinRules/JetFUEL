@@ -49,7 +49,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\JetFuel.ps1
 - Checks and repairs the JetKVM Tailscale boot hook at `/userdata/init.d/S22tailscale`.
 - Provides a Web UI tab that embeds the official JetKVM interface directly inside JetFUEL using verified Microsoft WebView2 support.
 - Provides a Diagnostics tab for health checks, D-state process detection, JetKVM app/crash logs, saveable support reports, reboot tools, OTA access, and guarded DFU recovery resources.
-- Provides an Inventory tab that combines JetKVM identity with a local Windows PC hardware/network summary, displays both in JetFUEL, and saves a timestamped text report to the Windows Desktop.
+- Provides an Inventory tab that combines JetKVM identity with a local Windows PC hardware/network summary, displays both in JetFUEL, and lets the user explicitly save or copy the report.
 - Keeps colour-coded logs and a copy-log button.
 - Provides an Identity tab for JetKVM MAC status, generated local-administered MAC profiles, custom MAC override, and clearing the user override.
 - Loads JetKVM's default EDID/USB identity presets, scans the Windows PC for monitor EDID and USB keyboard/mouse VID/PID candidates, then lets you choose human-readable display and USB identity candidates.
@@ -144,7 +144,7 @@ JetFUEL does not collect or store the JetKVM password used by this interface. Au
 
 ## JetKVM And Local PC Inventory
 
-The `Inventory` tab uses the JetKVM address and SSH private key entered on the `Setup` tab. Select `Collect and save` to read and display:
+The `Inventory` tab uses the JetKVM address and SSH private key entered on the `Setup` tab. Select `Collect details` to read and display:
 
 - KVM make and model, JetKVM app version, and system version.
 - Hardware serial number and Ethernet MAC address.
@@ -154,7 +154,7 @@ The `Inventory` tab uses the JetKVM address and SSH private key entered on the `
 - The local PC processor and installed physical memory.
 - The current external IP address. This lookup uses `api.ipify.org` with a short timeout; a failed lookup is recorded as `Unavailable` without stopping the report.
 
-Each collection automatically creates a timestamped UTF-8 text report on the current Windows user's Desktop. `Copy details` copies the same formatted report to the clipboard, and `Open saved report` opens the most recently generated file.
+Collection does not write a file automatically. `Save report` opens a standard Windows Save dialog with a suggested timestamped filename, `Copy details` copies the same formatted report to the clipboard, and `Open saved report` opens the most recently saved file.
 
 Developer Mode SSH must be enabled while collecting the JetKVM inventory. Local PC fields are collected with Windows CIM and do not require JetKVM access.
 
