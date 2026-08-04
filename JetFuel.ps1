@@ -2030,12 +2030,14 @@ function Get-LocalWindowsInventory {
     $pc = $null
     $bios = $null
     $cpu = $null
+    $operatingSystem = $null
     $nic = $null
     $networkAdapters = @()
 
     try { $pc = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop } catch {}
     try { $bios = Get-CimInstance Win32_BIOS -ErrorAction Stop } catch {}
     try { $cpu = Get-CimInstance Win32_Processor -ErrorAction Stop | Select-Object -First 1 } catch {}
+    try { $operatingSystem = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop } catch {}
     try { $networkAdapters = @(Get-CimInstance Win32_NetworkAdapter -ErrorAction Stop) } catch {}
     try {
         $adaptersByIndex = @{}
@@ -2076,10 +2078,22 @@ function Get-LocalWindowsInventory {
         return $unavailable
     }
 
+    $windowsVersion = $unavailable
+    if ($operatingSystem) {
+        $caption = Get-LocalInventoryValue $operatingSystem.Caption
+        $buildNumber = Get-LocalInventoryValue $operatingSystem.BuildNumber
+        if ($caption -ne $unavailable -and $buildNumber -ne $unavailable) {
+            $windowsVersion = "$caption (build $buildNumber)"
+        } elseif ($caption -ne $unavailable) {
+            $windowsVersion = $caption
+        }
+    }
+
     return [pscustomobject][ordered]@{
         PcName = Get-LocalInventoryValue $(if ($pc) { $pc.Name } else { $null })
         PcMake = Get-LocalInventoryValue $(if ($pc) { $pc.Manufacturer } else { $null })
         PcModel = Get-LocalInventoryValue $(if ($pc) { $pc.Model } else { $null })
+        WindowsVersion = $windowsVersion
         SerialNumber = Get-LocalInventoryValue $(if ($bios) { $bios.SerialNumber } else { $null })
         MacAddress = Get-LocalInventoryValue $(if ($nic) { $nic.MACAddress } else { $null })
         Cpu = Get-LocalInventoryValue $(if ($cpu) { $cpu.Name } else { $null })
@@ -2114,6 +2128,7 @@ function Format-JetKvmInventoryReport {
             "PC Name: $($local.PcName)",
             "PC Make: $($local.PcMake)",
             "PC Model: $($local.PcModel)",
+            "Windows Version: $($local.WindowsVersion)",
             "PC Serial Number: $($local.SerialNumber)",
             "PC MAC: $($local.MacAddress)",
             "CPU: $($local.Cpu)",
@@ -4932,7 +4947,7 @@ Status log
 - Drag the splitter above the log to make it larger or smaller.
 
 Inventory tab
-- Uses the Setup tab JetKVM address and SSH key to collect a concise device record, then reads this Windows PC's make/model, serial, primary active physical-adapter MAC, CPU, RAM, and external IP.
+- Uses the Setup tab JetKVM address and SSH key to collect a concise device record, then reads this Windows PC's make/model, Windows 10/11 edition and build, serial, primary active physical-adapter MAC, CPU, RAM, and external IP.
 - Collect and save displays both sections and writes one timestamped text report automatically to the Windows Desktop.
 - The external-IP lookup uses api.ipify.org with a short timeout. If it is unavailable, the remaining inventory is still displayed and saved.
 - Reports include device and network identifiers. Review them before sharing. Cloud credentials, auth keys, passwords, and SSH key contents are never included.
@@ -5500,11 +5515,11 @@ Inventory tab
     $inventoryGrid.AutoSize = $true
     $inventoryGrid.AutoSizeMode = [Windows.Forms.AutoSizeMode]::GrowAndShrink
     $inventoryGrid.ColumnCount = 2
-    $inventoryGrid.RowCount = 20
+    $inventoryGrid.RowCount = 21
     $inventoryGrid.Padding = New-ScaledPadding 10 7 10 8
     $inventoryGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, (S 190))) | Out-Null
     $inventoryGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
-    for ($i = 0; $i -lt 20; $i++) {
+    for ($i = 0; $i -lt 21; $i++) {
         $inventoryGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::AutoSize)) | Out-Null
     }
 
@@ -5575,6 +5590,7 @@ Inventory tab
         "PC Name" = New-InventoryValueLabel
         "PC Make" = New-InventoryValueLabel
         "PC Model" = New-InventoryValueLabel
+        "Windows Version" = New-InventoryValueLabel
         "PC Serial Number" = New-InventoryValueLabel
         "PC MAC" = New-InventoryValueLabel
         "CPU" = New-InventoryValueLabel
@@ -5595,7 +5611,7 @@ Inventory tab
     $inventoryPrivacyLabel.Dock = "Top"
     $inventoryPrivacyLabel.ForeColor = $ui.Warn
     $inventoryPrivacyLabel.Padding = New-ScaledPadding 0 7 0 1
-    $inventoryGrid.Controls.Add($inventoryPrivacyLabel, 0, 18)
+    $inventoryGrid.Controls.Add($inventoryPrivacyLabel, 0, 19)
     $inventoryGrid.SetColumnSpan($inventoryPrivacyLabel, 2)
 
     $inventoryPathLabel = New-RowLabel "No report has been generated yet."
@@ -5603,7 +5619,7 @@ Inventory tab
     $inventoryPathLabel.Dock = "Top"
     $inventoryPathLabel.ForeColor = $ui.Muted
     $inventoryPathLabel.Padding = New-ScaledPadding 0 6 0 1
-    $inventoryGrid.Controls.Add($inventoryPathLabel, 0, 19)
+    $inventoryGrid.Controls.Add($inventoryPathLabel, 0, 20)
     $inventoryGrid.SetColumnSpan($inventoryPathLabel, 2)
     $inventoryGroup.Controls.Add($inventoryGrid)
     $inventoryPage.Controls.Add($inventoryGroup)
@@ -6882,6 +6898,7 @@ Inventory tab
             $localInventoryRows["PC Name"].Text = $localInventory.PcName
             $localInventoryRows["PC Make"].Text = $localInventory.PcMake
             $localInventoryRows["PC Model"].Text = $localInventory.PcModel
+            $localInventoryRows["Windows Version"].Text = $localInventory.WindowsVersion
             $localInventoryRows["PC Serial Number"].Text = $localInventory.SerialNumber
             $localInventoryRows["PC MAC"].Text = $localInventory.MacAddress
             $localInventoryRows["CPU"].Text = $localInventory.Cpu

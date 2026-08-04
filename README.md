@@ -150,7 +150,7 @@ The `Inventory` tab uses the JetKVM address and SSH private key entered on the `
 - Hardware serial number and Ethernet MAC address.
 - JetKVM hostname and Tailscale hostname.
 - Whether JetKVM cloud access is configured.
-- The local Windows PC name, make, model, BIOS serial number, and primary active physical network-adapter MAC address. PCI/USB hardware is preferred over virtual adapters such as Tailscale, Hyper-V, or VMware.
+- The local Windows PC name, make, model, Windows 10/11 edition and build, BIOS serial number, and primary active physical network-adapter MAC address. PCI/USB hardware is preferred over virtual adapters such as Tailscale, Hyper-V, or VMware.
 - The local PC processor and installed physical memory.
 - The current external IP address. This lookup uses `api.ipify.org` with a short timeout; a failed lookup is recorded as `Unavailable` without stopping the report.
 
