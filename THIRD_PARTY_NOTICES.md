@@ -1,17 +1,17 @@
 # Third-Party Notices
 
-## JetKVM Desktop
+## Microsoft Edge WebView2
 
-JetFUEL's optional managed Web UI downloads and launches the [jetkvm-desktop](https://github.com/lkarlslund/jetkvm-desktop/) community client by Lars Karlslund.
+JetFUEL's optional embedded Web UI downloads the pinned `Microsoft.Web.WebView2` SDK package from Microsoft's NuGet distribution and loads its WinForms support files from JetFUEL's private application-data directory.
 
-- License: MIT
-- Copyright: Lars Karlslund and jetkvm-desktop contributors
-- Distribution: downloaded on demand from the project's GitHub Releases; no binary or source copy is bundled in JetFUEL
-- Integrity: JetFUEL verifies the SHA-256 digest published by GitHub for the selected Windows x64 release asset before installation
-- Runtime compatibility: if the upstream ZIP omits known MinGW files, JetFUEL may copy matching x64 runtime files from the user's existing Git for Windows installation into its managed client directory. These files are not stored in this repository and are removed with the managed client.
-- License preservation: JetFUEL writes the upstream MIT text beside every managed installation as `LICENSE-jetkvm-desktop.txt`.
+- Package: `Microsoft.Web.WebView2`
+- SDK version: `1.0.4078.44`
+- Distribution: downloaded on demand from `api.nuget.org`; no SDK binary is bundled in this repository
+- Integrity: JetFUEL verifies a pinned SHA-256 before installing the package files
+- License preservation: the package's `LICENSE.txt` is installed beside the private support files as `LICENSE-WebView2.txt`
+- Runtime: when required, JetFUEL downloads Microsoft's Evergreen WebView2 Runtime installer and verifies its Microsoft Corporation Authenticode signature before execution. JetFUEL cleanup does not uninstall this shared runtime.
 
-The upstream license and notices shipped with a downloaded release continue to apply to that client.
+Microsoft's license terms shipped in the downloaded package and runtime continue to apply.
 
 ## ConfigJon Firmware-Management
 

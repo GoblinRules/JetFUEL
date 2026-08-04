@@ -47,8 +47,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\JetFuel.ps1
 - Supports clean Tailscale installs.
 - Provides Tailscale check, repair, and remove actions.
 - Checks and repairs the JetKVM Tailscale boot hook at `/userdata/init.d/S22tailscale`.
-- Provides a Web UI tab that installs, verifies, launches, updates, and uninstalls a JetFUEL-managed enhanced interface powered by the community JetKVM Desktop project.
+- Provides a Web UI tab that embeds the official JetKVM interface directly inside JetFUEL using verified Microsoft WebView2 support.
 - Provides a Diagnostics tab for health checks, D-state process detection, JetKVM app/crash logs, saveable support reports, reboot tools, OTA access, and guarded DFU recovery resources.
+- Provides an Inventory tab that collects a concise JetKVM device record, displays it in JetFUEL, and saves a timestamped text report to the Windows Desktop.
 - Keeps colour-coded logs and a copy-log button.
 - Provides an Identity tab for JetKVM MAC status, generated local-administered MAC profiles, custom MAC override, and clearing the user override.
 - Loads JetKVM's default EDID/USB identity presets, scans the Windows PC for monitor EDID and USB keyboard/mouse VID/PID candidates, then lets you choose human-readable display and USB identity candidates.
@@ -131,15 +132,28 @@ After Tailscale is online, you can remove the SSH public key from JetKVM or disa
 
 ## JetFUEL Web UI
 
-The `Web UI` tab manages an enhanced Windows interface powered by [jetkvm-desktop](https://github.com/lkarlslund/jetkvm-desktop/), an MIT-licensed native client by Lars Karlslund. It opens in a native window because its Go/WebRTC video and input stack cannot be embedded directly inside PowerShell WinForms.
+The `Web UI` tab loads the JetKVM's official web interface directly inside the JetFUEL window. Video, keyboard/mouse input, settings, and authentication therefore use the same interface served by the selected JetKVM.
 
-- `Install Web UI` downloads the latest `jetkvm-desktop-windows-amd64.zip` release from the fixed upstream GitHub repository, verifies GitHub's published SHA-256 digest and required runtime files, and installs it under `%LOCALAPPDATA%\JetFUEL\tools\jetkvm-desktop`.
-- If an upstream Windows package omits its known MinGW runtime files, JetFUEL can supply matching x64 copies from the local Git for Windows installation used by the setup workflow. Architecture and completeness are checked before an existing managed installation is changed.
-- `Discover devices` launches the interface without an address so it can discover local JetKVMs.
-- `Open Setup device` passes the JetKVM hostname or IP from the Setup tab to the interface.
-- `Uninstall Web UI` closes the managed process and removes the executable and private MinGW runtime copies.
+- `Install Web UI` downloads the pinned `Microsoft.Web.WebView2` SDK package from NuGet, verifies its SHA-256, and installs the private WinForms support files under `%LOCALAPPDATA%\JetFUEL\tools\webview2`.
+- If the shared Microsoft Edge WebView2 Runtime is missing, JetFUEL downloads Microsoft's Evergreen installer and verifies its Microsoft Corporation Authenticode signature before running it.
+- Enter a device address or reuse the Setup address, then select `Open`. The toolbar also provides Back, Forward, Refresh, and `Open externally`.
+- JetFUEL connects directly to the specified address. It does not perform recurring `/24` subnet scans or depend on mDNS discovery.
+- `Remove support` closes the embedded control and removes JetFUEL's private support files and browser cache. It leaves the shared WebView2 Runtime installed because Windows and other applications may use it.
 
-JetFUEL does not collect or store the JetKVM password used by this interface. Authentication prompts remain inside its native window. The MIT license permits use, modification, and redistribution when its copyright and license notice are retained. JetFUEL currently installs the verified upstream build on demand rather than maintaining a fork of the security-sensitive WebRTC stack; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+JetFUEL does not collect or store the JetKVM password used by this interface. Authentication remains inside the embedded JetKVM web session. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the WebView2 SDK notice.
+
+## JetKVM Device Inventory
+
+The `Inventory` tab uses the JetKVM address and SSH private key entered on the `Setup` tab. Select `Collect and save` to read and display:
+
+- KVM make and model, JetKVM app version, and system version.
+- Hardware serial number and Ethernet MAC address.
+- JetKVM hostname and Tailscale hostname.
+- Whether JetKVM cloud access is configured.
+
+Each collection automatically creates a timestamped UTF-8 text report on the current Windows user's Desktop. `Copy details` copies the same formatted report to the clipboard, and `Open saved report` opens the most recently generated file.
+
+Developer Mode SSH must be enabled while collecting the inventory. The report does not include SSH keys, passwords, Tailscale auth keys, or the JetKVM cloud token; cloud status is reported only as configured or not configured.
 
 ## Installer Script Sources
 
@@ -220,7 +234,7 @@ Use the red `EXIT` button in the wizard header when you are finished.
 
 - `No` exits only.
 - `Yes` removes JetFUEL temp folders and the downloaded `%LOCALAPPDATA%\JetFUEL` bootstrap copy when present.
-- This cleanup closes and uninstalls the JetFUEL-managed Web UI, including private MinGW runtime files stored below `%LOCALAPPDATA%\JetFUEL\tools`.
+- This cleanup closes the embedded Web UI and removes its private SDK files and browser cache below `%LOCALAPPDATA%\JetFUEL`. The shared Microsoft Edge WebView2 Runtime is not uninstalled.
 - SSH keys are left in place.
 - Git for Windows / Git Bash is only uninstalled after a second confirmation because other tools may depend on it.
 

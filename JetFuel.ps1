@@ -16,6 +16,8 @@ public static extern int SetProcessDpiAwareness(int value);
 public static extern bool SetProcessDPIAware();
 [DllImport("kernel32.dll")]
 public static extern uint SetErrorMode(uint uMode);
+[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+public static extern bool SetDllDirectory(string lpPathName);
 '@
     # 1 = PROCESS_SYSTEM_DPI_AWARE. Fails harmlessly when awareness was already set.
     if ([JetFuel.DpiNative]::SetProcessDpiAwareness(1) -ne 0) {
@@ -460,6 +462,7 @@ function Invoke-JetFuelCleanup {
 
     Write-JetFuelCleanupLog -Log $Log -Message "Starting JetFUEL cleanup. SSH key files are left untouched."
     Remove-JetFuelTemporaryFiles -Log $Log
+    Remove-JetFuelWebView2Support -Log $Log
     Remove-JetKvmDesktopClient -Log $Log -StopRunning
     Remove-JetFuelLocalCache -Log $Log
 
@@ -557,6 +560,21 @@ function Invoke-JetFuelResponsiveDownload {
         }
     } finally {
         $client.Dispose()
+    }
+}
+
+function Get-JetFuelFileSha256 {
+    param([Parameter(Mandatory)][string]$Path)
+
+    $stream = $null
+    $sha256 = $null
+    try {
+        $stream = [IO.File]::OpenRead($Path)
+        $sha256 = [Security.Cryptography.SHA256]::Create()
+        return ([BitConverter]::ToString($sha256.ComputeHash($stream))).Replace("-", "")
+    } finally {
+        if ($sha256) { $sha256.Dispose() }
+        if ($stream) { $stream.Dispose() }
     }
 }
 
@@ -758,7 +776,7 @@ function Install-JetKvmDesktopClient {
         New-Item -ItemType Directory -Path $stagingPath -Force | Out-Null
         if ($Log) { & $Log "Downloading JetKVM Desktop $($release.Version) from the pinned upstream repository..." }
         Invoke-JetFuelResponsiveDownload -Uri $release.AssetUrl -Destination $archivePath
-        $actualHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256 -ErrorAction Stop).Hash.ToUpperInvariant()
+        $actualHash = Get-JetFuelFileSha256 -Path $archivePath
         if ($actualHash -ne $release.Sha256) {
             throw "JetKVM Desktop SHA-256 verification failed. Expected $($release.Sha256), received $actualHash."
         }
@@ -867,6 +885,208 @@ function Start-JetKvmDesktopClient {
         # Windows PowerShell 5.1 rejects -ArgumentList when the supplied array is empty.
         Start-Process -FilePath $state.Executable -WorkingDirectory $state.Root | Out-Null
     }
+}
+
+function Get-JetFuelWebView2InstallRoot {
+    if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+        throw "LOCALAPPDATA is not available, so JetFUEL cannot manage the embedded Web UI."
+    }
+    return (Join-Path $env:LOCALAPPDATA "JetFUEL\tools\webview2")
+}
+
+function Get-JetFuelWebView2State {
+    $root = Get-JetFuelWebView2InstallRoot
+    $manifestPath = Join-Path $root "jetfuel-install.json"
+    $manifest = $null
+    if (Test-Path -LiteralPath $manifestPath) {
+        try {
+            $manifest = Get-Content -LiteralPath $manifestPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        } catch {}
+    }
+    $required = @(
+        "Microsoft.Web.WebView2.Core.dll",
+        "Microsoft.Web.WebView2.WinForms.dll",
+        "WebView2Loader.dll"
+    )
+    $missing = @($required | Where-Object { -not (Test-Path -LiteralPath (Join-Path $root $_)) })
+    return [pscustomobject]@{
+        Installed = ($missing.Count -eq 0)
+        Root = $root
+        ManifestPath = $manifestPath
+        Version = if ($manifest -and $manifest.version) { [string]$manifest.version } else { $null }
+        Missing = $missing
+    }
+}
+
+function Import-JetFuelWebView2Support {
+    $state = Get-JetFuelWebView2State
+    if (-not $state.Installed) {
+        $details = if ($state.Missing.Count -gt 0) { ": $($state.Missing -join ', ')" } else { "" }
+        throw "The embedded Web UI support files are not installed$details. Use Install Web UI first."
+    }
+
+    if (-not ("Microsoft.Web.WebView2.WinForms.WebView2" -as [type])) {
+        [void][JetFuel.DpiNative]::SetDllDirectory($state.Root)
+        Add-Type -Path (Join-Path $state.Root "Microsoft.Web.WebView2.Core.dll") -ErrorAction Stop
+        Add-Type -Path (Join-Path $state.Root "Microsoft.Web.WebView2.WinForms.dll") -ErrorAction Stop
+    }
+    return $state
+}
+
+function Get-JetFuelWebView2RuntimeVersion {
+    [void](Import-JetFuelWebView2Support)
+    try {
+        return [Microsoft.Web.WebView2.Core.CoreWebView2Environment]::GetAvailableBrowserVersionString()
+    } catch {
+        return $null
+    }
+}
+
+function Install-JetFuelWebView2Runtime {
+    param([scriptblock]$Log)
+
+    $installerPath = Join-Path ([IO.Path]::GetTempPath()) ("JetFUEL-WebView2Setup-" + [Guid]::NewGuid().ToString("N") + ".exe")
+    try {
+        if ($Log) { & $Log "Microsoft Edge WebView2 Runtime is missing. Downloading Microsoft's Evergreen installer..." }
+        Invoke-JetFuelResponsiveDownload -Uri "https://go.microsoft.com/fwlink/p/?LinkId=2124703" -Destination $installerPath
+        $signature = Get-AuthenticodeSignature -LiteralPath $installerPath
+        if ($signature.Status -ne [Management.Automation.SignatureStatus]::Valid -or
+            -not $signature.SignerCertificate -or
+            $signature.SignerCertificate.Subject -notmatch '(^|,\s*)CN=Microsoft Corporation(,|$)') {
+            throw "The downloaded WebView2 Runtime installer does not have a valid Microsoft Corporation signature."
+        }
+        if ($Log) { & $Log "[OK] Microsoft signature verified. Installing WebView2 Runtime..." }
+        $process = Start-Process -FilePath $installerPath -ArgumentList @("/silent", "/install") -Wait -PassThru
+        if ($process.ExitCode -ne 0) {
+            throw "Microsoft WebView2 Runtime installer failed with exit code $($process.ExitCode)."
+        }
+    } finally {
+        if (Test-Path -LiteralPath $installerPath) {
+            Remove-Item -LiteralPath $installerPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Install-JetFuelWebView2Support {
+    param([scriptblock]$Log)
+
+    $version = "1.0.4078.44"
+    $expectedSha256 = "DC4D1D9168DF26B830398303E50210B6E1729F6CE5A7AC69D2C766852F489962"
+    $packageUri = "https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/$version/microsoft.web.webview2.$version.nupkg"
+    $state = Get-JetFuelWebView2State
+    if ($state.Installed -and $state.Version -eq $version) {
+        $runtimeVersion = Get-JetFuelWebView2RuntimeVersion
+        if ([string]::IsNullOrWhiteSpace($runtimeVersion)) {
+            Install-JetFuelWebView2Runtime -Log $Log
+            $runtimeVersion = Get-JetFuelWebView2RuntimeVersion
+        }
+        if ([string]::IsNullOrWhiteSpace($runtimeVersion)) {
+            throw "Microsoft Edge WebView2 Runtime is still unavailable after installation. Restart Windows and retry."
+        }
+        return [pscustomobject]@{ Version = $version; RuntimeVersion = $runtimeVersion; Root = $state.Root }
+    }
+
+    if ("Microsoft.Web.WebView2.WinForms.WebView2" -as [type]) {
+        throw "The embedded Web UI support is already loaded. Close and reopen JetFUEL before reinstalling it."
+    }
+
+    $workRoot = Join-Path ([IO.Path]::GetTempPath()) ("JetFUEL-webview2-" + [Guid]::NewGuid().ToString("N"))
+    $archivePath = Join-Path $workRoot "webview2.zip"
+    $extractPath = Join-Path $workRoot "package"
+    $stagingPath = Join-Path $workRoot "staging"
+    try {
+        New-Item -ItemType Directory -Path $extractPath, $stagingPath -Force | Out-Null
+        if ($Log) { & $Log "Downloading pinned Microsoft WebView2 SDK $version..." }
+        Invoke-JetFuelResponsiveDownload -Uri $packageUri -Destination $archivePath
+        $actualHash = Get-JetFuelFileSha256 -Path $archivePath
+        if ($actualHash -ne $expectedSha256) {
+            throw "WebView2 SDK SHA-256 verification failed. Expected $expectedSha256, received $actualHash."
+        }
+        if ($Log) { & $Log "[OK] WebView2 SDK package SHA-256 verified." }
+        Expand-Archive -LiteralPath $archivePath -DestinationPath $extractPath -Force
+
+        $payload = [ordered]@{
+            "Microsoft.Web.WebView2.Core.dll" = "lib\net462\Microsoft.Web.WebView2.Core.dll"
+            "Microsoft.Web.WebView2.WinForms.dll" = "lib\net462\Microsoft.Web.WebView2.WinForms.dll"
+            "WebView2Loader.dll" = "runtimes\win-x64\native\WebView2Loader.dll"
+            "LICENSE-WebView2.txt" = "LICENSE.txt"
+        }
+        foreach ($entry in $payload.GetEnumerator()) {
+            $source = Join-Path $extractPath $entry.Value
+            if (-not (Test-Path -LiteralPath $source)) {
+                throw "The verified WebView2 package is missing $($entry.Value)."
+            }
+            Copy-Item -LiteralPath $source -Destination (Join-Path $stagingPath $entry.Key) -Force
+        }
+        [ordered]@{
+            version = $version
+            installedAt = (Get-Date).ToUniversalTime().ToString("o")
+            package = "Microsoft.Web.WebView2"
+            packageUri = $packageUri
+            sha256 = $expectedSha256
+            license = "LICENSE-WebView2.txt"
+        } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $stagingPath "jetfuel-install.json") -Encoding UTF8
+
+        # Remove the retired external client while migrating to the embedded UI.
+        Remove-JetKvmDesktopClient -Log $Log -StopRunning
+        if (Test-Path -LiteralPath $state.Root) {
+            Remove-Item -LiteralPath $state.Root -Recurse -Force -ErrorAction Stop
+        }
+        New-Item -ItemType Directory -Path (Split-Path -Parent $state.Root) -Force | Out-Null
+        Move-Item -LiteralPath $stagingPath -Destination $state.Root -Force
+
+        $runtimeVersion = Get-JetFuelWebView2RuntimeVersion
+        if ([string]::IsNullOrWhiteSpace($runtimeVersion)) {
+            Install-JetFuelWebView2Runtime -Log $Log
+            $runtimeVersion = Get-JetFuelWebView2RuntimeVersion
+        }
+        if ([string]::IsNullOrWhiteSpace($runtimeVersion)) {
+            throw "Microsoft Edge WebView2 Runtime is unavailable. Restart Windows and retry the Web UI installation."
+        }
+        if ($Log) { & $Log "[OK] Embedded Web UI support $version installed; Edge runtime $runtimeVersion detected." }
+        return [pscustomobject]@{ Version = $version; RuntimeVersion = $runtimeVersion; Root = $state.Root }
+    } finally {
+        if (Test-Path -LiteralPath $workRoot) {
+            Remove-Item -LiteralPath $workRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Remove-JetFuelWebView2Support {
+    param([scriptblock]$Log)
+
+    if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) { return }
+    $paths = @(
+        (Get-JetFuelWebView2InstallRoot),
+        (Join-Path $env:LOCALAPPDATA "JetFUEL\webview2-user-data")
+    )
+    $toolsRoot = Join-Path $env:LOCALAPPDATA "JetFUEL"
+    foreach ($path in $paths) {
+        if (-not (Test-Path -LiteralPath $path)) { continue }
+        if (-not (Test-PathInsideDirectory -Path $path -Root $toolsRoot)) {
+            throw "Refusing to remove embedded Web UI files outside the JetFUEL directory."
+        }
+        try {
+            Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop
+            Write-JetFuelCleanupLog -Log $Log -Message "Removed embedded Web UI files: $path"
+        } catch {
+            Start-JetFuelDelayedDirectoryRemoval -Path $path
+            Write-JetFuelCleanupLog -Log $Log -Message "Queued embedded Web UI file removal after exit: $path"
+        }
+    }
+}
+
+function Get-JetKvmWebUri {
+    param([Parameter(Mandatory)][string]$Address)
+
+    $trimmed = $Address.Trim()
+    Assert-ValidIpOrHost -Value ($trimmed -replace '^https?://', '')
+    if ($trimmed -notmatch '^https?://') { $trimmed = "http://$trimmed" }
+    $uri = $null
+    if (-not [Uri]::TryCreate($trimmed, [UriKind]::Absolute, [ref]$uri) -or $uri.Scheme -notin @("http", "https")) {
+        throw "Enter a valid JetKVM HTTP or HTTPS address."
+    }
+    return $uri
 }
 
 function ConvertTo-BashPath {
@@ -1719,6 +1939,130 @@ else
   echo '[OK] no crashdump directory exists'
 fi
 '@
+}
+
+function Get-JetKvmInventory {
+    param(
+        [Parameter(Mandatory)][string]$JetKvmAddress,
+        [Parameter(Mandatory)][string]$KeyPath
+    )
+
+    $script = @'
+clean_value() {
+  printf '%s' "$1" | tr '\r\n' '  ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+}
+
+serial="$(awk -F: '/^Serial[[:space:]]*:/{gsub(/[[:space:]]/, "", $2); print $2; exit}' /proc/cpuinfo 2>/dev/null)"
+sku="$(cat /etc/jetkvm-sku 2>/dev/null)"
+[ -n "$sku" ] || sku='jetkvm-v2'
+system_version="$(cat /version 2>/dev/null)"
+app_version=''
+if command -v wget >/dev/null 2>&1; then
+  app_version="$(wget -qO- http://127.0.0.1/metrics 2>/dev/null | sed -n 's/^jetkvm_build_info{.*version="\([^"]*\)".*/\1/p' | head -n 1)"
+fi
+mac="$(cat /sys/class/net/eth0/address 2>/dev/null)"
+hostname_value="$(hostname 2>/dev/null)"
+
+cloud_state='Not configured'
+if [ -r /userdata/kvm_config.json ] && grep -Eq '"cloud_token"[[:space:]]*:[[:space:]]*"[^"]+"' /userdata/kvm_config.json; then
+  cloud_state='Configured'
+fi
+
+tailscale_name=''
+if command -v tailscale >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
+  tailscale_name="$(timeout 8 tailscale debug prefs 2>/dev/null | sed -n 's/.*"Hostname"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
+fi
+
+printf 'JETFUEL_INVENTORY_SERIAL=%s\n' "$(clean_value "$serial")"
+printf 'JETFUEL_INVENTORY_SKU=%s\n' "$(clean_value "$sku")"
+printf 'JETFUEL_INVENTORY_APP_VERSION=%s\n' "$(clean_value "$app_version")"
+printf 'JETFUEL_INVENTORY_SYSTEM_VERSION=%s\n' "$(clean_value "$system_version")"
+printf 'JETFUEL_INVENTORY_MAC=%s\n' "$(clean_value "$mac")"
+printf 'JETFUEL_INVENTORY_HOSTNAME=%s\n' "$(clean_value "$hostname_value")"
+printf 'JETFUEL_INVENTORY_TAILSCALE_NAME=%s\n' "$(clean_value "$tailscale_name")"
+printf 'JETFUEL_INVENTORY_CLOUD_STATE=%s\n' "$(clean_value "$cloud_state")"
+'@
+
+    $command = ConvertTo-JetKvmEncodedShellCommand -Script $script
+    $result = Invoke-JetKvmSshCommand -JetKvmAddress $JetKvmAddress -KeyPath $KeyPath -Command $command -TimeoutSeconds 25
+    if ($result.TimedOut) {
+        throw "JetKVM inventory collection timed out after 25 seconds."
+    }
+    if ($result.ExitCode -ne 0) {
+        throw "JetKVM inventory collection failed with exit code $($result.ExitCode)."
+    }
+
+    $values = @{}
+    foreach ($line in ((Remove-AnsiEscapeSequences -Text $result.Output) -split "`n")) {
+        if ($line -match '^JETFUEL_INVENTORY_([A-Z_]+)=(.*)$') {
+            $values[$Matches[1]] = $Matches[2].Trim()
+        }
+    }
+    if (-not $values.ContainsKey("SKU")) {
+        throw "JetKVM inventory output was incomplete. Confirm Developer Mode SSH access and try again."
+    }
+
+    function Get-InventoryValue([string]$Name, [string]$Fallback = "Not available") {
+        if ($values.ContainsKey($Name) -and -not [string]::IsNullOrWhiteSpace([string]$values[$Name])) {
+            return [string]$values[$Name]
+        }
+        return $Fallback
+    }
+
+    $sku = Get-InventoryValue "SKU" "jetkvm-v2"
+    $appVersion = Get-InventoryValue "APP_VERSION" "Unknown"
+    $systemVersion = Get-InventoryValue "SYSTEM_VERSION" "Unknown"
+    return [pscustomobject][ordered]@{
+        KvmMake = "JetKVM"
+        KvmModelVersion = "$sku | App $appVersion | System $systemVersion"
+        SerialNumber = Get-InventoryValue "SERIAL"
+        MacAddress = (Get-InventoryValue "MAC").ToUpperInvariant()
+        Hostname = Get-InventoryValue "HOSTNAME"
+        TailscaleName = Get-InventoryValue "TAILSCALE_NAME"
+        CloudConfiguredState = Get-InventoryValue "CLOUD_STATE" "Unknown"
+        JetKvmAddress = $JetKvmAddress
+        CollectedAt = Get-Date
+    }
+}
+
+function Format-JetKvmInventoryReport {
+    param([Parameter(Mandatory)]$Inventory)
+
+    return (@(
+        "JetFUEL JetKVM inventory",
+        "Generated: $($Inventory.CollectedAt.ToString('yyyy-MM-dd HH:mm:ss zzz'))",
+        "JetKVM address: $($Inventory.JetKvmAddress)",
+        "",
+        "KVM Make: $($Inventory.KvmMake)",
+        "KVM Model/Version: $($Inventory.KvmModelVersion)",
+        "Serial Number: $($Inventory.SerialNumber)",
+        "MAC: $($Inventory.MacAddress)",
+        "Hostname: $($Inventory.Hostname)",
+        "Tailscale Name: $($Inventory.TailscaleName)",
+        "Cloud Configured State: $($Inventory.CloudConfiguredState)",
+        ""
+    ) -join [Environment]::NewLine)
+}
+
+function Save-JetKvmInventoryReportToDesktop {
+    param([Parameter(Mandatory)]$Inventory)
+
+    $desktop = [Environment]::GetFolderPath([Environment+SpecialFolder]::DesktopDirectory)
+    if ([string]::IsNullOrWhiteSpace($desktop) -or -not (Test-Path -LiteralPath $desktop)) {
+        throw "The Windows Desktop folder could not be found."
+    }
+    $identity = [string]$Inventory.Hostname
+    if ([string]::IsNullOrWhiteSpace($identity) -or $identity -eq "Not available") {
+        $identity = [string]$Inventory.SerialNumber
+    }
+    if ([string]::IsNullOrWhiteSpace($identity) -or $identity -eq "Not available") {
+        $identity = [string]$Inventory.JetKvmAddress
+    }
+    $safeIdentity = ($identity -replace '[^A-Za-z0-9._-]', '_').Trim('_')
+    if ([string]::IsNullOrWhiteSpace($safeIdentity)) { $safeIdentity = "JetKVM" }
+    $path = Join-Path $desktop ("JetFUEL-JetKVM-{0}-{1}.txt" -f $safeIdentity, (Get-Date -Format "yyyyMMdd-HHmmss"))
+    [IO.File]::WriteAllText($path, (Format-JetKvmInventoryReport -Inventory $Inventory), [Text.UTF8Encoding]::new($false))
+    return $path
 }
 
 function Get-JetKvmManualAppUpdateCommand {
@@ -4165,9 +4509,9 @@ function Start-JetFuelGuiV2 {
     $navPanel = [Windows.Forms.TableLayoutPanel]::new()
     $navPanel.Dock = "Fill"
     $navPanel.BackColor = $ui.Window
-    $navPanel.ColumnCount = 9
+    $navPanel.ColumnCount = 10
     $navPanel.RowCount = 1
-    foreach ($width in @(82, 88, 88, 84, 100, 118, 88, 72)) {
+    foreach ($width in @(72, 72, 72, 68, 86, 110, 74, 60, 82)) {
         $navPanel.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, (S $width))) | Out-Null
     }
     $navPanel.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
@@ -4204,6 +4548,10 @@ function Start-JetFuelGuiV2 {
     $helpTabButton.Text = "Help"
     $helpTabButton.Dock = "Fill"
     $helpTabButton.Margin = New-ScaledPadding 0 0 4 0
+    $inventoryTabButton = [Windows.Forms.Button]::new()
+    $inventoryTabButton.Text = "Inventory"
+    $inventoryTabButton.Dock = "Fill"
+    $inventoryTabButton.Margin = New-ScaledPadding 0 0 4 0
     Set-ButtonStyle $setupTabButton "Primary"
     Set-ButtonStyle $desktopTabButton "Secondary"
     Set-ButtonStyle $tailscaleTabButton "Secondary"
@@ -4212,6 +4560,7 @@ function Start-JetFuelGuiV2 {
     Set-ButtonStyle $biosTabButton "Danger"
     Set-ButtonStyle $settingsTabButton "Secondary"
     Set-ButtonStyle $helpTabButton "Secondary"
+    Set-ButtonStyle $inventoryTabButton "Secondary"
     $navPanel.Controls.Add($setupTabButton, 0, 0)
     $navPanel.Controls.Add($desktopTabButton, 1, 0)
     $navPanel.Controls.Add($tailscaleTabButton, 2, 0)
@@ -4220,6 +4569,7 @@ function Start-JetFuelGuiV2 {
     $navPanel.Controls.Add($biosTabButton, 5, 0)
     $navPanel.Controls.Add($settingsTabButton, 6, 0)
     $navPanel.Controls.Add($helpTabButton, 7, 0)
+    $navPanel.Controls.Add($inventoryTabButton, 8, 0)
 
     $pageHost = [Windows.Forms.Panel]::new()
     $pageHost.Dock = "Fill"
@@ -4232,7 +4582,7 @@ function Start-JetFuelGuiV2 {
     $desktopPage = [Windows.Forms.Panel]::new()
     $desktopPage.Dock = "Fill"
     $desktopPage.BackColor = $ui.Window
-    $desktopPage.AutoScroll = $true
+    $desktopPage.AutoScroll = $false
     $tailscalePage = [Windows.Forms.Panel]::new()
     $tailscalePage.Dock = "Fill"
     $tailscalePage.BackColor = $ui.Window
@@ -4255,6 +4605,10 @@ function Start-JetFuelGuiV2 {
     $helpPage = [Windows.Forms.Panel]::new()
     $helpPage.Dock = "Fill"
     $helpPage.BackColor = $ui.Window
+    $inventoryPage = [Windows.Forms.Panel]::new()
+    $inventoryPage.Dock = "Fill"
+    $inventoryPage.BackColor = $ui.Window
+    $inventoryPage.AutoScroll = $false
 
     $setupLayout = [Windows.Forms.TableLayoutPanel]::new()
     $setupLayout.Dock = "Top"
@@ -4294,15 +4648,14 @@ function Start-JetFuelGuiV2 {
     $tailscalePage.Controls.Add($tailscaleLayout)
 
     $desktopLayout = [Windows.Forms.TableLayoutPanel]::new()
-    $desktopLayout.Dock = "Top"
-    $desktopLayout.AutoSize = $true
-    $desktopLayout.AutoSizeMode = [Windows.Forms.AutoSizeMode]::GrowAndShrink
+    $desktopLayout.Dock = "Fill"
+    $desktopLayout.AutoSize = $false
     $desktopLayout.BackColor = $ui.Window
     $desktopLayout.ColumnCount = 1
     $desktopLayout.RowCount = 2
     $desktopLayout.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
-    $desktopLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::AutoSize)) | Out-Null
-    $desktopLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::AutoSize)) | Out-Null
+    $desktopLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, (S 112))) | Out-Null
+    $desktopLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
     $desktopPage.Controls.Add($desktopLayout)
 
     $settingsLayout = [Windows.Forms.TableLayoutPanel]::new()
@@ -4406,19 +4759,18 @@ Setup tab
 
 Exit / cleanup
 - The red EXIT button asks whether to exit only, clean up and exit, or cancel.
-- Cleanup removes JetFUEL temp folders, the downloaded %LOCALAPPDATA%\JetFUEL bootstrap copy, and any JetFUEL-managed JetKVM Desktop client.
+- Cleanup removes JetFUEL temp folders, the downloaded %LOCALAPPDATA%\JetFUEL bootstrap copy, the private embedded Web UI support files, and its browser cache.
+- The shared Microsoft Edge WebView2 Runtime is left installed because Windows and other applications may use it.
 - SSH keys are left in place.
 - Git for Windows / Git Bash is only uninstalled after a second confirmation because other tools may use it.
 
 Web UI tab
-- Installs a JetFUEL-managed enhanced Web UI component powered by Lars Karlslund's MIT-licensed JetKVM Desktop project. Its native video/input window is launched by JetFUEL because that Go/WebRTC interface cannot run inside PowerShell WinForms.
-- Install Web UI fetches the latest Windows x64 release from the fixed lkarlslund/jetkvm-desktop GitHub repository and verifies GitHub's published SHA-256 before replacing JetFUEL's managed copy.
-- Required runtime files are checked. If the upstream ZIP omits known MinGW files, JetFUEL can supply matching x64 copies from the local Git for Windows installation.
-- Discover devices opens the Web UI without an address so its local discovery screen can find JetKVMs.
-- Open Setup device opens it directly against the JetKVM address entered on the Setup tab.
-- JetKVM passwords are prompted for by the desktop client and are not collected or stored by JetFUEL.
-- Uninstall Web UI removes the executable and its private MinGW runtime copies under %LOCALAPPDATA%\JetFUEL\tools. Exit cleanup does the same automatically. Neither action changes a JetKVM or SSH key.
-- Project and license: https://github.com/lkarlslund/jetkvm-desktop/ (MIT).
+- Embeds the JetKVM's official web interface directly inside JetFUEL, including video and keyboard/mouse input.
+- Install Web UI downloads a pinned Microsoft WebView2 SDK package, verifies its SHA-256, and installs only JetFUEL's private support DLLs. If the shared Microsoft Edge WebView2 Runtime is missing, JetFUEL downloads Microsoft's signed Evergreen installer.
+- Enter a device address or reuse the Setup address, then select Open. Back, Forward, Refresh, and Open externally provide normal browser controls.
+- JetFUEL connects only to the address you specify. This tab does not scan every address on the local subnet and does not depend on mDNS discovery.
+- JetKVM authentication remains inside the embedded web session. JetFUEL does not collect or store the JetKVM password.
+- Remove support deletes JetFUEL's private SDK files and browser profile. It does not uninstall the shared Edge WebView2 Runtime or change the JetKVM or SSH keys.
 
 Tailscale tab
 - Check Tailscale prints status, Tailscale IP, version, routes, DNS, and running Tailscale processes.
@@ -4496,10 +4848,16 @@ Status log
 - Shows the detailed output from preflight, install, repair, remove, and checks.
 - Use Copy logs when reporting an issue or saving the output.
 - Drag the splitter above the log to make it larger or smaller.
+
+Inventory tab
+- Uses the Setup tab JetKVM address and SSH key to collect a concise device record.
+- Collect and save reads the JetKVM make, model/app/system versions, hardware serial, Ethernet MAC, hostname, Tailscale name, and cloud-configured state.
+- A timestamped text report is saved automatically to the Windows Desktop. Cloud credentials, auth keys, passwords, and SSH key contents are never included.
+- Copy details copies the displayed report. Open saved report opens the most recently generated text file.
 "@
     $helpPage.Controls.Add($helpBox)
 
-    $pageHost.Controls.AddRange(@($helpPage, $settingsPage, $biosPage, $diagnosticsPage, $identityPage, $tailscalePage, $desktopPage, $setupPage))
+    $pageHost.Controls.AddRange(@($inventoryPage, $helpPage, $settingsPage, $biosPage, $diagnosticsPage, $identityPage, $tailscalePage, $desktopPage, $setupPage))
     $showPage = {
         param([string]$Name)
         $setupPage.Visible = ($Name -eq "Setup")
@@ -4510,6 +4868,7 @@ Status log
         $biosPage.Visible = ($Name -eq "BIOS")
         $settingsPage.Visible = ($Name -eq "Settings")
         $helpPage.Visible = ($Name -eq "Help")
+        $inventoryPage.Visible = ($Name -eq "Inventory")
         Set-ButtonStyle $setupTabButton $(if ($Name -eq "Setup") { "Primary" } else { "Secondary" })
         Set-ButtonStyle $desktopTabButton $(if ($Name -eq "Desktop") { "Primary" } else { "Secondary" })
         Set-ButtonStyle $tailscaleTabButton $(if ($Name -eq "Tailscale") { "Primary" } else { "Secondary" })
@@ -4518,15 +4877,22 @@ Status log
         Set-ButtonStyle $biosTabButton "Danger"
         Set-ButtonStyle $settingsTabButton $(if ($Name -eq "Settings") { "Primary" } else { "Secondary" })
         Set-ButtonStyle $helpTabButton $(if ($Name -eq "Help") { "Primary" } else { "Secondary" })
+        Set-ButtonStyle $inventoryTabButton $(if ($Name -eq "Inventory") { "Primary" } else { "Secondary" })
     }
     $setupTabButton.Add_Click({ & $showPage "Setup" })
-    $desktopTabButton.Add_Click({ & $showPage "Desktop" })
+    $desktopTabButton.Add_Click({
+        if ([string]::IsNullOrWhiteSpace($desktopWebAddressBox.Text) -and -not [string]::IsNullOrWhiteSpace($ipBox.Text)) {
+            $desktopWebAddressBox.Text = $ipBox.Text.Trim()
+        }
+        & $showPage "Desktop"
+    })
     $tailscaleTabButton.Add_Click({ & $showPage "Tailscale" })
     $identityTabButton.Add_Click({ & $showPage "Identity" })
     $diagnosticsTabButton.Add_Click({ & $showPage "Diagnostics" })
     $biosTabButton.Add_Click({ & $showPage "BIOS" })
     $settingsTabButton.Add_Click({ & $showPage "Settings" })
     $helpTabButton.Add_Click({ & $showPage "Help" })
+    $inventoryTabButton.Add_Click({ & $showPage "Inventory" })
 
     $pageShell.Controls.Add($navPanel, 0, 0)
     $pageShell.Controls.Add($pageHost, 0, 1)
@@ -4771,109 +5137,102 @@ Status log
     $setupActionPanel.Controls.Add($runButton, 1, 0)
     $setupLayout.Controls.Add($setupActionPanel, 0, 3)
 
-    $desktopClientGroup = New-Group "JetFUEL Web UI"
-    & $makeGroupAutoHeight $desktopClientGroup
-    $desktopClientGrid = [Windows.Forms.TableLayoutPanel]::new()
-    $desktopClientGrid.Dock = "Top"
-    $desktopClientGrid.AutoSize = $true
-    $desktopClientGrid.AutoSizeMode = [Windows.Forms.AutoSizeMode]::GrowAndShrink
-    $desktopClientGrid.ColumnCount = 1
-    $desktopClientGrid.RowCount = 4
-    $desktopClientGrid.Padding = New-ScaledPadding 8 6 8 5
-    $desktopClientGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
-    for ($i = 0; $i -lt 4; $i++) {
-        $desktopClientGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::AutoSize)) | Out-Null
+    $desktopToolbarGroup = New-Group "Embedded JetKVM Web UI"
+    $desktopToolbarGroup.Dock = "Fill"
+    $desktopToolbarGrid = [Windows.Forms.TableLayoutPanel]::new()
+    $desktopToolbarGrid.Dock = "Fill"
+    $desktopToolbarGrid.Padding = New-ScaledPadding 8 5 8 5
+    $desktopToolbarGrid.ColumnCount = 7
+    $desktopToolbarGrid.RowCount = 2
+    $desktopToolbarGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, (S 92))) | Out-Null
+    $desktopToolbarGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
+    foreach ($width in @(76, 48, 48, 76, 132)) {
+        $desktopToolbarGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, (S $width))) | Out-Null
     }
-    $desktopIntro = New-RowLabel "Install JetFUEL's managed enhanced Web UI, powered by Lars Karlslund's MIT-licensed JetKVM Desktop project. It provides native video/input, local discovery, and direct connections in a separate window."
-    $desktopIntro.AutoSize = $true
-    $desktopIntro.Dock = "Top"
-    $desktopStatusLabel = New-RowLabel "Checking managed client..."
-    $desktopStatusLabel.AutoSize = $true
-    $desktopStatusLabel.Dock = "Top"
-    $desktopStatusLabel.Font = [Drawing.Font]::new("Segoe UI", 10, [Drawing.FontStyle]::Bold)
-    $desktopActions = [Windows.Forms.FlowLayoutPanel]::new()
-    $desktopActions.Dock = "Top"
-    $desktopActions.AutoSize = $true
-    $desktopActions.AutoSizeMode = [Windows.Forms.AutoSizeMode]::GrowAndShrink
-    $desktopActions.WrapContents = $true
-    $desktopActions.Margin = New-ScaledPadding 0 5 0 2
+    $desktopToolbarGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, (S 36))) | Out-Null
+    $desktopToolbarGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
+
+    $desktopAddressLabel = New-RowLabel "Device address"
+    $desktopAddressLabel.Dock = "Fill"
+    $desktopAddressLabel.TextAlign = "MiddleLeft"
+    $desktopWebAddressBox = New-Field ""
+    $desktopWebAddressBox.Dock = "Fill"
+    $desktopWebAddressBox.Margin = New-ScaledPadding 0 3 8 3
+    $openEmbeddedWebButton = [Windows.Forms.Button]::new()
+    $openEmbeddedWebButton.Text = "Open"
+    $openEmbeddedWebButton.Dock = "Fill"
+    $openEmbeddedWebButton.Margin = New-ScaledPadding 0 2 4 2
+    Set-ButtonStyle $openEmbeddedWebButton "Primary"
+    $webBackButton = [Windows.Forms.Button]::new()
+    $webBackButton.Text = "<"
+    $webBackButton.Dock = "Fill"
+    $webBackButton.Margin = New-ScaledPadding 0 2 4 2
+    Set-ButtonStyle $webBackButton "Secondary"
+    $setupTips.SetToolTip($webBackButton, "Back")
+    $webForwardButton = [Windows.Forms.Button]::new()
+    $webForwardButton.Text = ">"
+    $webForwardButton.Dock = "Fill"
+    $webForwardButton.Margin = New-ScaledPadding 0 2 4 2
+    Set-ButtonStyle $webForwardButton "Secondary"
+    $setupTips.SetToolTip($webForwardButton, "Forward")
+    $webRefreshButton = [Windows.Forms.Button]::new()
+    $webRefreshButton.Text = "Refresh"
+    $webRefreshButton.Dock = "Fill"
+    $webRefreshButton.Margin = New-ScaledPadding 0 2 4 2
+    Set-ButtonStyle $webRefreshButton "Secondary"
+    $webExternalButton = [Windows.Forms.Button]::new()
+    $webExternalButton.Text = "Open externally"
+    $webExternalButton.Dock = "Fill"
+    $webExternalButton.Margin = New-ScaledPadding 0 2 0 2
+    Set-ButtonStyle $webExternalButton "Secondary"
+
+    $desktopStatusLabel = New-RowLabel "Checking embedded browser support..."
+    $desktopStatusLabel.Dock = "Fill"
+    $desktopStatusLabel.TextAlign = "MiddleLeft"
+    $desktopStatusLabel.Font = [Drawing.Font]::new("Segoe UI", 9, [Drawing.FontStyle]::Bold)
     $installDesktopButton = [Windows.Forms.Button]::new()
     $installDesktopButton.Text = "Install Web UI"
-    $installDesktopButton.Size = [Drawing.Size]::new((S 148), (S 36))
-    $installDesktopButton.Margin = New-ScaledPadding 0 2 8 3
+    $installDesktopButton.Dock = "Fill"
+    $installDesktopButton.Margin = New-ScaledPadding 0 2 4 2
     Set-ButtonStyle $installDesktopButton "Primary"
-    $discoverDesktopButton = [Windows.Forms.Button]::new()
-    $discoverDesktopButton.Text = "Discover devices"
-    $discoverDesktopButton.Size = [Drawing.Size]::new((S 148), (S 36))
-    $discoverDesktopButton.Margin = New-ScaledPadding 0 2 8 3
-    Set-ButtonStyle $discoverDesktopButton "Secondary"
-    $connectDesktopButton = [Windows.Forms.Button]::new()
-    $connectDesktopButton.Text = "Open Setup device"
-    $connectDesktopButton.Size = [Drawing.Size]::new((S 190), (S 36))
-    $connectDesktopButton.Margin = New-ScaledPadding 0 2 8 3
-    Set-ButtonStyle $connectDesktopButton "Secondary"
     $removeDesktopButton = [Windows.Forms.Button]::new()
-    $removeDesktopButton.Text = "Uninstall Web UI"
-    $removeDesktopButton.Size = [Drawing.Size]::new((S 132), (S 36))
-    $removeDesktopButton.Margin = New-ScaledPadding 0 2 8 3
+    $removeDesktopButton.Text = "Remove support"
+    $removeDesktopButton.Dock = "Fill"
+    $removeDesktopButton.Margin = New-ScaledPadding 0 2 0 2
     Set-ButtonStyle $removeDesktopButton "Danger"
-    $desktopActions.Controls.AddRange(@($installDesktopButton, $discoverDesktopButton, $connectDesktopButton, $removeDesktopButton))
-    $desktopSecurity = New-RowLabel "JetFUEL verifies the upstream release SHA-256 and required runtime files before installing it under %LOCALAPPDATA%\JetFUEL\tools. Missing matching x64 MinGW files are copied privately from Git for Windows. Exit cleanup removes this entire managed component; SSH keys remain untouched. Passwords stay inside the native Web UI window and are not stored by JetFUEL."
-    $desktopSecurity.AutoSize = $true
-    $desktopSecurity.Dock = "Top"
-    $desktopSecurity.ForeColor = $ui.Muted
-    $desktopClientGrid.Controls.Add($desktopIntro, 0, 0)
-    $desktopClientGrid.Controls.Add($desktopStatusLabel, 0, 1)
-    $desktopClientGrid.Controls.Add($desktopActions, 0, 2)
-    $desktopClientGrid.Controls.Add($desktopSecurity, 0, 3)
-    $desktopClientGroup.Controls.Add($desktopClientGrid)
-    $desktopLayout.Controls.Add($desktopClientGroup, 0, 0)
 
-    $desktopAboutGroup = New-Group "License and source"
-    & $makeGroupAutoHeight $desktopAboutGroup
-    $desktopAboutGrid = [Windows.Forms.TableLayoutPanel]::new()
-    $desktopAboutGrid.Dock = "Top"
-    $desktopAboutGrid.AutoSize = $true
-    $desktopAboutGrid.AutoSizeMode = [Windows.Forms.AutoSizeMode]::GrowAndShrink
-    $desktopAboutGrid.ColumnCount = 1
-    $desktopAboutGrid.RowCount = 2
-    $desktopAboutGrid.Padding = New-ScaledPadding 8 6 8 5
-    $desktopAboutGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
-    $desktopAboutGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::AutoSize)) | Out-Null
-    $desktopAboutGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::AutoSize)) | Out-Null
-    $desktopAbout = New-RowLabel "The MIT license permits JetFUEL to use, modify, and redistribute the upstream work when its copyright and license notice are retained. JetFUEL currently installs a verified upstream Windows build on demand instead of maintaining a security-sensitive fork of its Go/WebRTC stack."
-    $desktopAbout.AutoSize = $true
-    $desktopAbout.Dock = "Top"
-    $desktopLinks = [Windows.Forms.FlowLayoutPanel]::new()
-    $desktopLinks.Dock = "Top"
-    $desktopLinks.AutoSize = $true
-    $desktopLinks.AutoSizeMode = [Windows.Forms.AutoSizeMode]::GrowAndShrink
-    $desktopLinks.WrapContents = $true
-    $desktopLinks.Margin = New-ScaledPadding 0 5 0 2
-    $desktopProjectButton = [Windows.Forms.Button]::new()
-    $desktopProjectButton.Text = "Project page"
-    $desktopProjectButton.Size = [Drawing.Size]::new((S 132), (S 34))
-    $desktopProjectButton.Margin = New-ScaledPadding 0 2 8 3
-    Set-ButtonStyle $desktopProjectButton "Secondary"
-    $desktopReleasesButton = [Windows.Forms.Button]::new()
-    $desktopReleasesButton.Text = "Release notes"
-    $desktopReleasesButton.Size = [Drawing.Size]::new((S 132), (S 34))
-    $desktopReleasesButton.Margin = New-ScaledPadding 0 2 8 3
-    Set-ButtonStyle $desktopReleasesButton "Secondary"
-    $desktopLinks.Controls.AddRange(@($desktopProjectButton, $desktopReleasesButton))
-    $desktopAboutGrid.Controls.Add($desktopAbout, 0, 0)
-    $desktopAboutGrid.Controls.Add($desktopLinks, 0, 1)
-    $desktopAboutGroup.Controls.Add($desktopAboutGrid)
-    $desktopLayout.Controls.Add($desktopAboutGroup, 0, 1)
-    $resizeDesktopText = {
-        $maximumWidth = [Math]::Max((S 360), $desktopPage.ClientSize.Width - (S 54))
-        foreach ($label in @($desktopIntro, $desktopSecurity, $desktopAbout)) {
-            $label.MaximumSize = [Drawing.Size]::new($maximumWidth, 0)
-        }
+    $desktopToolbarGrid.Controls.Add($desktopAddressLabel, 0, 0)
+    $desktopToolbarGrid.Controls.Add($desktopWebAddressBox, 1, 0)
+    $desktopToolbarGrid.Controls.Add($openEmbeddedWebButton, 2, 0)
+    $desktopToolbarGrid.Controls.Add($webBackButton, 3, 0)
+    $desktopToolbarGrid.Controls.Add($webForwardButton, 4, 0)
+    $desktopToolbarGrid.Controls.Add($webRefreshButton, 5, 0)
+    $desktopToolbarGrid.Controls.Add($webExternalButton, 6, 0)
+    $desktopToolbarGrid.Controls.Add($desktopStatusLabel, 0, 1)
+    $desktopToolbarGrid.SetColumnSpan($desktopStatusLabel, 5)
+    $desktopToolbarGrid.Controls.Add($installDesktopButton, 5, 1)
+    $desktopToolbarGrid.Controls.Add($removeDesktopButton, 6, 1)
+    $desktopToolbarGroup.Controls.Add($desktopToolbarGrid)
+    $desktopLayout.Controls.Add($desktopToolbarGroup, 0, 0)
+
+    $desktopBrowserHost = [Windows.Forms.Panel]::new()
+    $desktopBrowserHost.Dock = "Fill"
+    $desktopBrowserHost.Margin = New-ScaledPadding 0 6 0 0
+    $desktopBrowserHost.BackColor = $ui.Log
+    $desktopPlaceholder = [Windows.Forms.Label]::new()
+    $desktopPlaceholder.Text = "Install the embedded Web UI support, then enter or reuse the Setup device address and select Open.\r\n\r\nJetFUEL connects directly to that address. It does not scan the local subnet."
+    $desktopPlaceholder.Dock = "Fill"
+    $desktopPlaceholder.TextAlign = "MiddleCenter"
+    $desktopPlaceholder.ForeColor = $ui.Muted
+    $desktopPlaceholder.Font = [Drawing.Font]::new("Segoe UI", 10)
+    $desktopBrowserHost.Controls.Add($desktopPlaceholder)
+    $desktopLayout.Controls.Add($desktopBrowserHost, 0, 1)
+
+    $webUiState = [pscustomobject]@{
+        Control = $null
+        Ready = $false
+        RemovalPending = $false
     }
-    $desktopPage.Add_SizeChanged({ & $resizeDesktopText })
-    $desktopPage.Add_VisibleChanged({ if ($desktopPage.Visible) { & $resizeDesktopText } })
-    & $resizeDesktopText
 
     $actionPanel = [Windows.Forms.TableLayoutPanel]::new()
     $actionPanel.Dock = "Top"
@@ -5050,6 +5409,98 @@ Status log
     $diagnosticsPage.Add_SizeChanged({ & $resizeDiagnosticText })
     $diagnosticsPage.Add_VisibleChanged({ if ($diagnosticsPage.Visible) { & $resizeDiagnosticText } })
     & $resizeDiagnosticText
+
+    $inventoryGroup = New-Group "JetKVM device inventory"
+    & $makeGroupAutoHeight $inventoryGroup
+    $inventoryGrid = [Windows.Forms.TableLayoutPanel]::new()
+    $inventoryGrid.Dock = "Top"
+    $inventoryGrid.AutoSize = $true
+    $inventoryGrid.AutoSizeMode = [Windows.Forms.AutoSizeMode]::GrowAndShrink
+    $inventoryGrid.ColumnCount = 2
+    $inventoryGrid.RowCount = 10
+    $inventoryGrid.Padding = New-ScaledPadding 10 7 10 8
+    $inventoryGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, (S 190))) | Out-Null
+    $inventoryGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
+    for ($i = 0; $i -lt 10; $i++) {
+        $inventoryGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::AutoSize)) | Out-Null
+    }
+
+    $inventoryIntro = New-RowLabel "Collects a non-secret device record using the Setup address and Developer Mode SSH key, then saves it automatically to your Windows Desktop."
+    $inventoryIntro.AutoSize = $true
+    $inventoryIntro.Dock = "Top"
+    $inventoryIntro.Padding = New-ScaledPadding 0 2 0 5
+    $inventoryGrid.Controls.Add($inventoryIntro, 0, 0)
+    $inventoryGrid.SetColumnSpan($inventoryIntro, 2)
+
+    $inventoryActions = [Windows.Forms.FlowLayoutPanel]::new()
+    $inventoryActions.Dock = "Top"
+    $inventoryActions.AutoSize = $true
+    $inventoryActions.AutoSizeMode = [Windows.Forms.AutoSizeMode]::GrowAndShrink
+    $inventoryActions.WrapContents = $true
+    $collectInventoryButton = & $newDiagnosticsButton "Collect and save" "Primary" 156
+    $copyInventoryButton = & $newDiagnosticsButton "Copy details" "Secondary" 132
+    $openInventoryReportButton = & $newDiagnosticsButton "Open saved report" "Secondary" 156
+    $copyInventoryButton.Enabled = $false
+    $openInventoryReportButton.Enabled = $false
+    $inventoryActions.Controls.AddRange(@($collectInventoryButton, $copyInventoryButton, $openInventoryReportButton))
+    $inventoryGrid.Controls.Add($inventoryActions, 0, 1)
+    $inventoryGrid.SetColumnSpan($inventoryActions, 2)
+
+    function New-InventoryValueLabel {
+        $label = [Windows.Forms.Label]::new()
+        $label.Text = "Not collected"
+        $label.Dock = "Fill"
+        $label.AutoSize = $false
+        $label.Height = S 27
+        $label.TextAlign = [Drawing.ContentAlignment]::MiddleLeft
+        $label.Padding = New-ScaledPadding 8 0 8 0
+        $label.Margin = New-ScaledPadding 0 2 0 2
+        $label.BorderStyle = [Windows.Forms.BorderStyle]::FixedSingle
+        $label.BackColor = $ui.Surface2
+        $label.ForeColor = $ui.Text
+        $label.Font = [Drawing.Font]::new("Segoe UI", 9)
+        $label.AutoEllipsis = $true
+        return $label
+    }
+
+    $inventoryRows = [ordered]@{
+        "KVM Make" = New-InventoryValueLabel
+        "KVM Model / Version" = New-InventoryValueLabel
+        "Serial Number" = New-InventoryValueLabel
+        "MAC" = New-InventoryValueLabel
+        "Hostname" = New-InventoryValueLabel
+        "Tailscale Name" = New-InventoryValueLabel
+        "Cloud Configured State" = New-InventoryValueLabel
+    }
+    $rowIndex = 2
+    foreach ($entry in $inventoryRows.GetEnumerator()) {
+        $nameLabel = New-RowLabel $entry.Key
+        $nameLabel.ForeColor = $ui.Muted
+        $inventoryGrid.Controls.Add($nameLabel, 0, $rowIndex)
+        $inventoryGrid.Controls.Add($entry.Value, 1, $rowIndex)
+        $rowIndex++
+    }
+
+    $inventoryPathLabel = New-RowLabel "No report has been generated yet."
+    $inventoryPathLabel.AutoSize = $true
+    $inventoryPathLabel.Dock = "Top"
+    $inventoryPathLabel.ForeColor = $ui.Muted
+    $inventoryPathLabel.Padding = New-ScaledPadding 0 6 0 1
+    $inventoryGrid.Controls.Add($inventoryPathLabel, 0, 9)
+    $inventoryGrid.SetColumnSpan($inventoryPathLabel, 2)
+    $inventoryGroup.Controls.Add($inventoryGrid)
+    $inventoryPage.Controls.Add($inventoryGroup)
+
+    $inventoryState = [pscustomobject]@{
+        Data = $null
+        ReportPath = $null
+    }
+    $resizeInventoryIntro = {
+        $inventoryIntro.MaximumSize = [Drawing.Size]::new([Math]::Max((S 360), $inventoryPage.ClientSize.Width - (S 60)), 0)
+    }
+    $inventoryPage.Add_SizeChanged({ & $resizeInventoryIntro })
+    $inventoryPage.Add_VisibleChanged({ if ($inventoryPage.Visible) { & $resizeInventoryIntro } })
+    & $resizeInventoryIntro
 
     $macGroup = New-Group "Network MAC identity"
     & $makeGroupAutoHeight $macGroup
@@ -5681,41 +6132,142 @@ Status log
         Scan = $null
     }
 
+    $showDesktopPlaceholder = {
+        param([string]$Text)
+        if ($webUiState.Control) {
+            try { $webUiState.Control.Dispose() } catch {}
+            $webUiState.Control = $null
+            $webUiState.Ready = $false
+        }
+        $desktopPlaceholder.Text = $Text
+        $desktopBrowserHost.Controls.Clear()
+        $desktopBrowserHost.Controls.Add($desktopPlaceholder)
+    }
+
+    $initialiseEmbeddedWebUi = {
+        if ($webUiState.RemovalPending) {
+            throw "Embedded Web UI removal is scheduled. Close and reopen JetFUEL before installing or opening it again."
+        }
+        if ($webUiState.Control -and $webUiState.Ready) { return $webUiState.Control }
+
+        $support = Import-JetFuelWebView2Support
+        $runtimeVersion = Get-JetFuelWebView2RuntimeVersion
+        if ([string]::IsNullOrWhiteSpace($runtimeVersion)) {
+            throw "Microsoft Edge WebView2 Runtime is not available. Use Install Web UI to install or repair it."
+        }
+
+        $browser = [Microsoft.Web.WebView2.WinForms.WebView2]::new()
+        $browser.Dock = "Fill"
+        $browser.BackColor = $ui.Log
+        $creation = [Microsoft.Web.WebView2.WinForms.CoreWebView2CreationProperties]::new()
+        $creation.UserDataFolder = Join-Path $env:LOCALAPPDATA "JetFUEL\webview2-user-data"
+        $browser.CreationProperties = $creation
+        $desktopBrowserHost.Controls.Clear()
+        $desktopBrowserHost.Controls.Add($browser)
+
+        $task = $browser.EnsureCoreWebView2Async($null)
+        $deadline = (Get-Date).AddSeconds(30)
+        while (-not $task.IsCompleted -and (Get-Date) -lt $deadline) {
+            [Windows.Forms.Application]::DoEvents()
+            Start-Sleep -Milliseconds 40
+        }
+        if (-not $task.IsCompleted) {
+            $browser.Dispose()
+            throw "The embedded browser did not initialise within 30 seconds."
+        }
+        if ($task.IsFaulted) {
+            $message = $task.Exception.GetBaseException().Message
+            $browser.Dispose()
+            throw "The embedded browser failed to initialise: $message"
+        }
+
+        $browser.CoreWebView2.Settings.IsStatusBarEnabled = $false
+        $browser.CoreWebView2.Settings.IsZoomControlEnabled = $true
+        $browser.CoreWebView2.Settings.AreDefaultContextMenusEnabled = $true
+        $browser.Add_NavigationStarting({
+            param($sender, $eventArgs)
+            $desktopStatusLabel.Text = "Loading $($eventArgs.Uri)..."
+            $desktopStatusLabel.ForeColor = $ui.Info
+        })
+        $browser.Add_NavigationCompleted({
+            param($sender, $eventArgs)
+            if ($eventArgs.IsSuccess) {
+                $desktopStatusLabel.Text = "Connected inside JetFUEL: $($sender.Source.Host)"
+                $desktopStatusLabel.ForeColor = $ui.Good
+            } else {
+                $desktopStatusLabel.Text = "Web UI navigation failed: $($eventArgs.WebErrorStatus)"
+                $desktopStatusLabel.ForeColor = $ui.Bad
+            }
+            $webBackButton.Enabled = $sender.CanGoBack
+            $webForwardButton.Enabled = $sender.CanGoForward
+        })
+        $webUiState.Control = $browser
+        $webUiState.Ready = $true
+        $desktopStatusLabel.Text = "Embedded browser ready: SDK $($support.Version), runtime $runtimeVersion"
+        $desktopStatusLabel.ForeColor = $ui.Good
+        return $browser
+    }
+
+    $openEmbeddedWebUi = {
+        param([string]$Address)
+        $uri = Get-JetKvmWebUri -Address $Address
+        $browser = & $initialiseEmbeddedWebUi
+        $desktopWebAddressBox.Text = $uri.GetLeftPart([UriPartial]::Authority)
+        $browser.Source = $uri
+        & $log "Opened the JetKVM Web UI inside JetFUEL for $($uri.Host)."
+    }
+
     $refreshDesktopStatus = {
         try {
-            $desktopState = Get-JetKvmDesktopState
+            if ($webUiState.RemovalPending) {
+                $desktopStatusLabel.Text = "Embedded Web UI removal is scheduled for exit"
+                $desktopStatusLabel.ForeColor = $ui.Warn
+                $installDesktopButton.Text = "Restart required"
+                $installDesktopButton.Enabled = $false
+                $removeDesktopButton.Enabled = $false
+                $openEmbeddedWebButton.Enabled = $false
+                return
+            }
+            $desktopState = Get-JetFuelWebView2State
             if ($desktopState.Installed) {
-                $versionText = if ($desktopState.Version) { $desktopState.Version } else { "version unknown" }
-                $runtime = Test-JetKvmDesktopRuntimeDependencies -ExecutablePath $desktopState.Executable
-                $installDesktopButton.Text = "Update / reinstall"
-                if ($runtime.Ready) {
-                    $desktopStatusLabel.Text = "Installed and ready: $versionText"
-                    $desktopStatusLabel.ForeColor = $ui.Good
-                    $discoverDesktopButton.Enabled = $true
-                    $connectDesktopButton.Enabled = $true
+                $runtimeVersion = Get-JetFuelWebView2RuntimeVersion
+                if ([string]::IsNullOrWhiteSpace($runtimeVersion)) {
+                    $desktopStatusLabel.Text = "Support installed; Microsoft WebView2 Runtime needs installation or repair"
+                    $desktopStatusLabel.ForeColor = $ui.Warn
+                    $installDesktopButton.Text = "Install runtime"
+                    $installDesktopButton.Enabled = $true
+                    $openEmbeddedWebButton.Enabled = $false
                 } else {
-                    $runtimeProblems = @($runtime.Missing) + @($runtime.Invalid | ForEach-Object { "$_ (invalid)" })
-                    $desktopStatusLabel.Text = "Installed but unusable: $($runtimeProblems -join ', ')"
-                    $desktopStatusLabel.ForeColor = $ui.Bad
-                    $discoverDesktopButton.Enabled = $false
-                    $connectDesktopButton.Enabled = $false
+                    $desktopStatusLabel.Text = "Ready inside JetFUEL: SDK $($desktopState.Version), runtime $runtimeVersion"
+                    $desktopStatusLabel.ForeColor = $ui.Good
+                    $installDesktopButton.Text = "Support installed"
+                    $installDesktopButton.Enabled = $false
+                    $openEmbeddedWebButton.Enabled = $true
                 }
                 $removeDesktopButton.Enabled = $true
             } else {
-                $desktopStatusLabel.Text = "Not installed by JetFUEL"
+                $missingText = if ($desktopState.Missing.Count -gt 0) { " ($($desktopState.Missing -join ', ') missing)" } else { "" }
+                $desktopStatusLabel.Text = "Embedded Web UI support is not installed$missingText"
                 $desktopStatusLabel.ForeColor = $ui.Warn
                 $installDesktopButton.Text = "Install Web UI"
-                $discoverDesktopButton.Enabled = $false
-                $connectDesktopButton.Enabled = $false
-                $removeDesktopButton.Enabled = $false
+                $installDesktopButton.Enabled = $true
+                $openEmbeddedWebButton.Enabled = $false
+                $removeDesktopButton.Enabled = Test-Path -LiteralPath $desktopState.Root
             }
         } catch {
-            $desktopStatusLabel.Text = "Status unavailable: $($_.Exception.Message)"
+            $desktopStatusLabel.Text = "Web UI status unavailable: $($_.Exception.Message)"
             $desktopStatusLabel.ForeColor = $ui.Bad
-            $discoverDesktopButton.Enabled = $false
-            $connectDesktopButton.Enabled = $false
+            $installDesktopButton.Enabled = $true
+            $openEmbeddedWebButton.Enabled = $false
             $removeDesktopButton.Enabled = $false
         }
+        $webBackButton.Enabled = $false
+        $webForwardButton.Enabled = $false
+        if ($webUiState.Ready -and $null -ne $webUiState.Control) {
+            $webBackButton.Enabled = $webUiState.Control.CanGoBack
+            $webForwardButton.Enabled = $webUiState.Control.CanGoForward
+        }
+        $webRefreshButton.Enabled = $webUiState.Ready
     }
     & $refreshDesktopStatus
 
@@ -5726,15 +6278,17 @@ Status log
         $checkTailscaleButton.Enabled = -not $Busy
         $repairTailscaleButton.Enabled = -not $Busy
         $removeTailscaleButton.Enabled = -not $Busy
-        $installDesktopButton.Enabled = -not $Busy
-        $desktopProjectButton.Enabled = -not $Busy
-        $desktopReleasesButton.Enabled = -not $Busy
         if ($Busy) {
-            $discoverDesktopButton.Enabled = $false
-            $connectDesktopButton.Enabled = $false
+            $installDesktopButton.Enabled = $false
+            $openEmbeddedWebButton.Enabled = $false
+            $webBackButton.Enabled = $false
+            $webForwardButton.Enabled = $false
+            $webRefreshButton.Enabled = $false
+            $webExternalButton.Enabled = $false
             $removeDesktopButton.Enabled = $false
         } else {
             & $refreshDesktopStatus
+            $webExternalButton.Enabled = $true
         }
         $refreshMacButton.Enabled = -not $Busy
         $generateMacButton.Enabled = -not $Busy
@@ -5756,6 +6310,9 @@ Status log
         )) {
             $diagnosticButton.Enabled = -not $Busy
         }
+        $collectInventoryButton.Enabled = -not $Busy
+        $copyInventoryButton.Enabled = (-not $Busy) -and ($null -ne $inventoryState.Data)
+        $openInventoryReportButton.Enabled = (-not $Busy) -and -not [string]::IsNullOrWhiteSpace([string]$inventoryState.ReportPath)
         $exitButton.Enabled = -not $Busy
         $statusLabel.Text = $Status
         [Windows.Forms.Application]::DoEvents()
@@ -5764,37 +6321,40 @@ Status log
     $installDesktopButton.Add_Click({
         try {
             & $setBusy $true "Installing Web UI..."
-            $installedState = Install-JetKvmDesktopClient -Log $log
-            & $setBusy $false "Web UI $($installedState.Version) ready"
-            [Windows.Forms.MessageBox]::Show(
-                "The JetFUEL-managed Web UI $($installedState.Version) is installed with its required runtime files. Use Discover devices or Open Setup device.",
-                "JetFUEL Web UI",
-                "OK",
-                "Information"
-            ) | Out-Null
+            $installedState = Install-JetFuelWebView2Support -Log $log
+            [void](& $initialiseEmbeddedWebUi)
+            & $setBusy $false "Embedded Web UI ready"
+            if (-not [string]::IsNullOrWhiteSpace($ipBox.Text)) {
+                $desktopWebAddressBox.Text = $ipBox.Text.Trim()
+            }
         } catch {
             & $log ("ERROR: " + $_.Exception.Message)
             & $setBusy $false "Web UI install failed"
             [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL Web UI", "OK", "Error") | Out-Null
         }
     })
-    $discoverDesktopButton.Add_Click({
+    $openEmbeddedWebButton.Add_Click({
         try {
-            Start-JetKvmDesktopClient
-            & $log "Opened Web UI device discovery."
+            $address = $desktopWebAddressBox.Text.Trim()
+            if ([string]::IsNullOrWhiteSpace($address)) { $address = $ipBox.Text.Trim() }
+            if ([string]::IsNullOrWhiteSpace($address)) {
+                throw "Enter a JetKVM address here or on the Setup tab first."
+            }
+            & $openEmbeddedWebUi $address
         } catch {
             & $log ("ERROR: " + $_.Exception.Message)
             [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL Web UI", "OK", "Error") | Out-Null
         }
     })
-    $connectDesktopButton.Add_Click({
+    $webBackButton.Add_Click({ if ($webUiState.Ready -and $webUiState.Control.CanGoBack) { $webUiState.Control.GoBack() } })
+    $webForwardButton.Add_Click({ if ($webUiState.Ready -and $webUiState.Control.CanGoForward) { $webUiState.Control.GoForward() } })
+    $webRefreshButton.Add_Click({ if ($webUiState.Ready) { $webUiState.Control.Reload() } })
+    $webExternalButton.Add_Click({
         try {
-            $address = $ipBox.Text.Trim()
-            if ([string]::IsNullOrWhiteSpace($address)) {
-                throw "Enter a JetKVM address on the Setup tab first, or use Discover devices."
-            }
-            Start-JetKvmDesktopClient -JetKvmAddress $address
-            & $log "Opened the Web UI for $address."
+            $address = $desktopWebAddressBox.Text.Trim()
+            if ([string]::IsNullOrWhiteSpace($address)) { $address = $ipBox.Text.Trim() }
+            $uri = Get-JetKvmWebUri -Address $address
+            Start-Process $uri.AbsoluteUri
         } catch {
             & $log ("ERROR: " + $_.Exception.Message)
             [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL Web UI", "OK", "Error") | Out-Null
@@ -5803,23 +6363,24 @@ Status log
     $removeDesktopButton.Add_Click({
         try {
             $answer = [Windows.Forms.MessageBox]::Show(
-                "Uninstall the JetFUEL-managed Web UI and its private MinGW runtime files? This does not change any JetKVM device or SSH key.",
-                "Uninstall Web UI",
+                "Remove JetFUEL's private embedded Web UI support and browser cache?`r`n`r`nThe shared Microsoft Edge WebView2 Runtime, JetKVM devices, and SSH keys are not removed. Loaded files may finish deleting after JetFUEL exits.",
+                "Remove Web UI support",
                 "YesNo",
                 "Warning"
             )
             if ($answer -ne [Windows.Forms.DialogResult]::Yes) { return }
             & $setBusy $true "Uninstalling Web UI..."
+            & $showDesktopPlaceholder "Embedded Web UI support has been removed or scheduled for removal. Close JetFUEL to finish cleanup."
+            Remove-JetFuelWebView2Support -Log $log
             Remove-JetKvmDesktopClient -Log $log -StopRunning
-            & $setBusy $false "Web UI uninstalled"
+            $webUiState.RemovalPending = $true
+            & $setBusy $false "Web UI removal scheduled"
         } catch {
             & $log ("ERROR: " + $_.Exception.Message)
             & $setBusy $false "Web UI uninstall failed"
             [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL Web UI", "OK", "Error") | Out-Null
         }
     })
-    $desktopProjectButton.Add_Click({ Start-Process "https://github.com/lkarlslund/jetkvm-desktop/" })
-    $desktopReleasesButton.Add_Click({ Start-Process "https://github.com/lkarlslund/jetkvm-desktop/releases" })
 
     $setIndicator = {
         param(
@@ -5981,7 +6542,7 @@ Status log
     })
     $exitButton.Add_Click({
         $choice = [Windows.Forms.MessageBox]::Show(
-            "Exit JetFUEL?`r`n`r`nYes = uninstall the JetFUEL-managed Web UI and its private MinGW files, clean up JetFUEL temp/downloaded files, optionally uninstall Git Bash, then exit.`r`nNo = exit only and leave installed tools in place.`r`nCancel = stay here.`r`n`r`nSSH key files are always left in place.",
+            "Exit JetFUEL?`r`n`r`nYes = remove JetFUEL's private embedded Web UI support and browser cache, clean up JetFUEL temp/downloaded files, optionally uninstall Git Bash, then exit.`r`nNo = exit only and leave installed tools in place.`r`nCancel = stay here.`r`n`r`nThe shared Microsoft Edge WebView2 Runtime and SSH key files are always left in place.",
             "Exit JetFUEL",
             "YesNoCancel",
             "Warning"
@@ -5991,6 +6552,7 @@ Status log
         if ($choice -eq [Windows.Forms.DialogResult]::Yes) {
             try {
                 & $setBusy $true "Cleaning up..."
+                & $showDesktopPlaceholder "JetFUEL is cleaning up embedded Web UI files..."
                 Invoke-JetFuelCleanup -Log $log
                 & $setBusy $false "Cleanup complete"
             } catch {
@@ -6008,6 +6570,13 @@ Status log
         }
 
         $form.Close()
+    })
+    $form.Add_FormClosing({
+        if ($webUiState.Control) {
+            try { $webUiState.Control.Dispose() } catch {}
+            $webUiState.Control = $null
+            $webUiState.Ready = $false
+        }
     })
     $normalisingHostV2 = $false
     $hostBox.Add_TextChanged({
@@ -6169,6 +6738,78 @@ Status log
             (Remove-AnsiEscapeSequences -Text $Result.Output) -split "`n" | ForEach-Object { & $log $_ }
         }
     }
+
+    $collectInventoryButton.Add_Click({
+        try {
+            $target = & $getJetKvmSshTarget
+            & $setBusy $true "Collecting inventory..."
+            & $log "--- Collecting JetKVM device inventory ---"
+
+            $inventory = Get-JetKvmInventory -JetKvmAddress $target.Ip -KeyPath $target.KeyPath
+            $reportPath = Save-JetKvmInventoryReportToDesktop -Inventory $inventory
+            $inventoryState.Data = $inventory
+            $inventoryState.ReportPath = $reportPath
+
+            $inventoryRows["KVM Make"].Text = $inventory.KvmMake
+            $inventoryRows["KVM Model / Version"].Text = $inventory.KvmModelVersion
+            $inventoryRows["Serial Number"].Text = $inventory.SerialNumber
+            $inventoryRows["MAC"].Text = $inventory.MacAddress
+            $inventoryRows["Hostname"].Text = $inventory.Hostname
+            $inventoryRows["Tailscale Name"].Text = $inventory.TailscaleName
+            $inventoryRows["Cloud Configured State"].Text = $inventory.CloudConfiguredState
+            $inventoryRows["Cloud Configured State"].ForeColor = if ($inventory.CloudConfiguredState -eq "Configured") { $ui.Good } else { $ui.Warn }
+            $inventoryPathLabel.Text = "Saved to: $reportPath"
+            $inventoryPathLabel.ForeColor = $ui.Good
+
+            & $log "[OK] KVM Make: $($inventory.KvmMake)"
+            & $log "[OK] KVM Model/Version: $($inventory.KvmModelVersion)"
+            & $log "[OK] Serial Number: $($inventory.SerialNumber)"
+            & $log "[OK] MAC: $($inventory.MacAddress)"
+            & $log "[OK] Hostname: $($inventory.Hostname)"
+            & $log "[OK] Tailscale Name: $($inventory.TailscaleName)"
+            & $log "[OK] Cloud Configured State: $($inventory.CloudConfiguredState)"
+            & $log "[OK] Inventory report saved: $reportPath"
+            & $setBusy $false "Inventory saved"
+
+            [Windows.Forms.MessageBox]::Show(
+                "JetKVM inventory collected and saved to:`r`n`r`n$reportPath",
+                "JetKVM inventory",
+                "OK",
+                "Information"
+            ) | Out-Null
+        } catch {
+            & $log ("ERROR: " + $_.Exception.Message)
+            & $setBusy $false "Inventory failed"
+            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetKVM inventory", "OK", "Error") | Out-Null
+        }
+    })
+
+    $copyInventoryButton.Add_Click({
+        try {
+            if ($null -eq $inventoryState.Data) {
+                throw "Collect the JetKVM inventory first."
+            }
+            [Windows.Forms.Clipboard]::SetText((Format-JetKvmInventoryReport -Inventory $inventoryState.Data))
+            & $log "[OK] JetKVM inventory details copied to the clipboard."
+        } catch {
+            & $log ("ERROR: " + $_.Exception.Message)
+            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetKVM inventory", "OK", "Error") | Out-Null
+        }
+    })
+
+    $openInventoryReportButton.Add_Click({
+        try {
+            $reportPath = [string]$inventoryState.ReportPath
+            if ([string]::IsNullOrWhiteSpace($reportPath) -or -not (Test-Path -LiteralPath $reportPath)) {
+                throw "Collect the JetKVM inventory first, or collect it again if the saved report was moved."
+            }
+            Start-Process -FilePath $reportPath
+            & $log "Opened inventory report: $reportPath"
+        } catch {
+            & $log ("ERROR: " + $_.Exception.Message)
+            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetKVM inventory", "OK", "Error") | Out-Null
+        }
+    })
 
     $openDiagnosticUrl = {
         param([string]$Url, [string]$Description)
