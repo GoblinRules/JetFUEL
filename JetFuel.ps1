@@ -27,6 +27,385 @@ public static extern bool SetDllDirectory(string lpPathName);
     try { [void][JetFuel.DpiNative]::SetProcessDPIAware() } catch {}
 }
 
+if (-not ("JetFuel.ThemedMessageBox" -as [type])) {
+    $themedMessageBoxSource = @'
+using System;
+using System.Drawing;
+using System.Runtime.InteropServices;
+using System.Windows.Forms;
+
+namespace JetFuel
+{
+    public static class ThemedMessageBox
+    {
+        private const int WM_NCLBUTTONDOWN = 0xA1;
+        private const int HT_CAPTION = 0x2;
+
+        [DllImport("user32.dll")]
+        private static extern bool ReleaseCapture();
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+        public static DialogResult Show(string text, string caption, string buttons, string icon)
+        {
+            MessageBoxButtons parsedButtons;
+            MessageBoxIcon parsedIcon;
+            if (!Enum.TryParse(buttons, true, out parsedButtons)) parsedButtons = MessageBoxButtons.OK;
+            if (!Enum.TryParse(icon, true, out parsedIcon)) parsedIcon = MessageBoxIcon.None;
+            return ShowCore(Form.ActiveForm, text, caption, parsedButtons, parsedIcon, null, null);
+        }
+
+        public static DialogResult Show(string text, string caption, MessageBoxButtons buttons, MessageBoxIcon icon)
+        {
+            return ShowCore(Form.ActiveForm, text, caption, buttons, icon, null, null);
+        }
+
+        public static DialogResult ShowActions(
+            string text,
+            string caption,
+            string icon,
+            string primaryAction,
+            string secondaryAction,
+            string cancelAction)
+        {
+            MessageBoxIcon parsedIcon;
+            if (!Enum.TryParse(icon, true, out parsedIcon)) parsedIcon = MessageBoxIcon.None;
+            return ShowCore(
+                Form.ActiveForm,
+                text,
+                caption,
+                MessageBoxButtons.YesNoCancel,
+                parsedIcon,
+                new string[] { primaryAction, secondaryAction, cancelAction },
+                new DialogResult[] { DialogResult.Yes, DialogResult.No, DialogResult.Cancel }
+            );
+        }
+
+        private static int Scale(float scale, int value)
+        {
+            return Math.Max(1, (int)Math.Round(value * scale));
+        }
+
+        private static Color FromHex(int value)
+        {
+            return Color.FromArgb((value >> 16) & 255, (value >> 8) & 255, value & 255);
+        }
+
+        private static DialogResult ShowCore(
+            IWin32Window owner,
+            string text,
+            string caption,
+            MessageBoxButtons buttons,
+            MessageBoxIcon icon,
+            string[] customLabels,
+            DialogResult[] customResults)
+        {
+            if (text == null) text = String.Empty;
+            if (String.IsNullOrWhiteSpace(caption)) caption = "JetFUEL";
+
+            float scale = 1.0f;
+            try
+            {
+                using (Graphics graphics = Graphics.FromHwnd(IntPtr.Zero))
+                {
+                    scale = Math.Max(1.0f, graphics.DpiX / 96.0f);
+                }
+            }
+            catch { }
+
+            Rectangle workingArea = Screen.FromPoint(Cursor.Position).WorkingArea;
+            Form ownerForm = owner as Form;
+            if (ownerForm != null && !ownerForm.IsDisposed)
+            {
+                workingArea = Screen.FromControl(ownerForm).WorkingArea;
+            }
+
+            int border = Scale(scale, 1);
+            int titleHeight = Scale(scale, 42);
+            int footerHeight = Scale(scale, 58);
+            int width = Math.Min(Scale(scale, 610), workingArea.Width - Scale(scale, 36));
+            width = Math.Max(Scale(scale, 430), width);
+            int iconArea = icon == MessageBoxIcon.None ? Scale(scale, 24) : Scale(scale, 76);
+            int messageWidth = width - iconArea - Scale(scale, 30);
+
+            Font bodyFont = new Font("Segoe UI", 9.0f, FontStyle.Regular);
+            Size measured = TextRenderer.MeasureText(
+                text,
+                bodyFont,
+                new Size(Math.Max(Scale(scale, 260), messageWidth), Int32.MaxValue),
+                TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl | TextFormatFlags.NoPadding
+            );
+            int maxBodyHeight = Math.Max(Scale(scale, 120), workingArea.Height - titleHeight - footerHeight - Scale(scale, 80));
+            int bodyHeight = Math.Max(Scale(scale, 96), Math.Min(maxBodyHeight, measured.Height + Scale(scale, 38)));
+            int height = titleHeight + bodyHeight + footerHeight + (border * 2);
+
+            Color windowColor = FromHex(0x0F172A);
+            Color surfaceColor = FromHex(0x1E293B);
+            Color surfaceAltColor = FromHex(0x111827);
+            Color borderColor = FromHex(0x475569);
+            Color textColor = FromHex(0xE2E8F0);
+            Color mutedColor = FromHex(0x94A3B8);
+            Color accentColor = FromHex(0x2563EB);
+            Color dangerColor = FromHex(0xEF4444);
+            Color warningColor = FromHex(0xF59E0B);
+            Color infoColor = FromHex(0x38BDF8);
+
+            Color severityColor = infoColor;
+            if (icon == MessageBoxIcon.Error) severityColor = dangerColor;
+            else if (icon == MessageBoxIcon.Warning) severityColor = warningColor;
+            else if (icon == MessageBoxIcon.Question) severityColor = accentColor;
+
+            Form dialog = new Form();
+            dialog.Text = caption;
+            dialog.FormBorderStyle = FormBorderStyle.None;
+            dialog.ShowInTaskbar = false;
+            dialog.StartPosition = ownerForm != null ? FormStartPosition.CenterParent : FormStartPosition.CenterScreen;
+            dialog.AutoScaleMode = AutoScaleMode.None;
+            dialog.ClientSize = new Size(width, height);
+            dialog.BackColor = borderColor;
+            dialog.ForeColor = textColor;
+            dialog.Font = bodyFont;
+            dialog.KeyPreview = true;
+
+            if (ownerForm != null && ownerForm.Icon != null)
+            {
+                dialog.Icon = ownerForm.Icon;
+            }
+
+            Panel titlePanel = new Panel();
+            titlePanel.SetBounds(border, border, width - (border * 2), titleHeight);
+            titlePanel.BackColor = surfaceAltColor;
+            titlePanel.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+
+            PictureBox appIcon = new PictureBox();
+            appIcon.SetBounds(Scale(scale, 13), Scale(scale, 10), Scale(scale, 22), Scale(scale, 22));
+            appIcon.SizeMode = PictureBoxSizeMode.Zoom;
+            if (dialog.Icon != null) appIcon.Image = dialog.Icon.ToBitmap();
+
+            Label titleLabel = new Label();
+            titleLabel.Text = caption;
+            titleLabel.ForeColor = textColor;
+            titleLabel.Font = new Font("Segoe UI Semibold", 10.0f, FontStyle.Bold);
+            titleLabel.AutoEllipsis = true;
+            titleLabel.TextAlign = ContentAlignment.MiddleLeft;
+            titleLabel.SetBounds(Scale(scale, 44), 0, width - Scale(scale, 96), titleHeight);
+            titleLabel.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+
+            Button closeButton = new Button();
+            closeButton.Text = "x";
+            closeButton.SetBounds(width - Scale(scale, 47), Scale(scale, 5), Scale(scale, 36), Scale(scale, 31));
+            closeButton.FlatStyle = FlatStyle.Flat;
+            closeButton.FlatAppearance.BorderSize = 0;
+            closeButton.BackColor = surfaceAltColor;
+            closeButton.ForeColor = mutedColor;
+            closeButton.Font = new Font("Segoe UI", 10.0f, FontStyle.Regular);
+            closeButton.Cursor = Cursors.Hand;
+            closeButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            closeButton.MouseEnter += delegate { closeButton.BackColor = dangerColor; closeButton.ForeColor = Color.White; };
+            closeButton.MouseLeave += delegate { closeButton.BackColor = surfaceAltColor; closeButton.ForeColor = mutedColor; };
+
+            MouseEventHandler dragHandler = delegate(object sender, MouseEventArgs args)
+            {
+                if (args.Button == MouseButtons.Left)
+                {
+                    ReleaseCapture();
+                    SendMessage(dialog.Handle, WM_NCLBUTTONDOWN, new IntPtr(HT_CAPTION), IntPtr.Zero);
+                }
+            };
+            titlePanel.MouseDown += dragHandler;
+            titleLabel.MouseDown += dragHandler;
+            appIcon.MouseDown += dragHandler;
+            titlePanel.Controls.Add(appIcon);
+            titlePanel.Controls.Add(titleLabel);
+            titlePanel.Controls.Add(closeButton);
+
+            Panel bodyPanel = new Panel();
+            bodyPanel.SetBounds(border, border + titleHeight, width - (border * 2), bodyHeight);
+            bodyPanel.BackColor = surfaceColor;
+            bodyPanel.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
+
+            Panel accentStrip = new Panel();
+            accentStrip.SetBounds(0, 0, Scale(scale, 4), bodyHeight);
+            accentStrip.BackColor = severityColor;
+            accentStrip.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left;
+            bodyPanel.Controls.Add(accentStrip);
+
+            if (icon != MessageBoxIcon.None)
+            {
+                Icon systemIcon = SystemIcons.Information;
+                if (icon == MessageBoxIcon.Error) systemIcon = SystemIcons.Error;
+                else if (icon == MessageBoxIcon.Warning) systemIcon = SystemIcons.Warning;
+                else if (icon == MessageBoxIcon.Question) systemIcon = SystemIcons.Question;
+
+                PictureBox severityIcon = new PictureBox();
+                severityIcon.SetBounds(Scale(scale, 22), Scale(scale, 24), Scale(scale, 34), Scale(scale, 34));
+                severityIcon.SizeMode = PictureBoxSizeMode.Zoom;
+                severityIcon.Image = systemIcon.ToBitmap();
+                bodyPanel.Controls.Add(severityIcon);
+            }
+
+            bool needsScrolling = measured.Height + Scale(scale, 38) > maxBodyHeight;
+            if (needsScrolling)
+            {
+                RichTextBox messageBox = new RichTextBox();
+                messageBox.Text = text;
+                messageBox.ReadOnly = true;
+                messageBox.BorderStyle = BorderStyle.None;
+                messageBox.BackColor = surfaceColor;
+                messageBox.ForeColor = textColor;
+                messageBox.Font = bodyFont;
+                messageBox.DetectUrls = true;
+                messageBox.ScrollBars = RichTextBoxScrollBars.Vertical;
+                messageBox.TabStop = false;
+                messageBox.SetBounds(iconArea, Scale(scale, 20), messageWidth, bodyHeight - Scale(scale, 34));
+                messageBox.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
+                bodyPanel.Controls.Add(messageBox);
+            }
+            else
+            {
+                Label messageLabel = new Label();
+                messageLabel.Text = text;
+                messageLabel.BackColor = surfaceColor;
+                messageLabel.ForeColor = textColor;
+                messageLabel.Font = bodyFont;
+                messageLabel.TextAlign = ContentAlignment.TopLeft;
+                messageLabel.UseCompatibleTextRendering = false;
+                messageLabel.SetBounds(iconArea, Scale(scale, 20), messageWidth, bodyHeight - Scale(scale, 34));
+                messageLabel.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
+                bodyPanel.Controls.Add(messageLabel);
+            }
+
+            Panel footerPanel = new Panel();
+            footerPanel.SetBounds(border, border + titleHeight + bodyHeight, width - (border * 2), footerHeight);
+            footerPanel.BackColor = windowColor;
+            footerPanel.Anchor = AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
+
+            string[] choiceLabels = customLabels;
+            DialogResult[] choiceResults = customResults;
+            if (choiceLabels == null || choiceResults == null || choiceLabels.Length != choiceResults.Length || choiceLabels.Length == 0)
+            {
+                switch (buttons)
+                {
+                    case MessageBoxButtons.OKCancel:
+                        choiceLabels = new string[] { "OK", "Cancel" };
+                        choiceResults = new DialogResult[] { DialogResult.OK, DialogResult.Cancel };
+                        break;
+                    case MessageBoxButtons.AbortRetryIgnore:
+                        choiceLabels = new string[] { "Abort", "Retry", "Ignore" };
+                        choiceResults = new DialogResult[] { DialogResult.Abort, DialogResult.Retry, DialogResult.Ignore };
+                        break;
+                    case MessageBoxButtons.YesNoCancel:
+                        choiceLabels = new string[] { "Yes", "No", "Cancel" };
+                        choiceResults = new DialogResult[] { DialogResult.Yes, DialogResult.No, DialogResult.Cancel };
+                        break;
+                    case MessageBoxButtons.YesNo:
+                        choiceLabels = new string[] { "Yes", "No" };
+                        choiceResults = new DialogResult[] { DialogResult.Yes, DialogResult.No };
+                        break;
+                    case MessageBoxButtons.RetryCancel:
+                        choiceLabels = new string[] { "Retry", "Cancel" };
+                        choiceResults = new DialogResult[] { DialogResult.Retry, DialogResult.Cancel };
+                        break;
+                    default:
+                        choiceLabels = new string[] { "OK" };
+                        choiceResults = new DialogResult[] { DialogResult.OK };
+                        break;
+                }
+            }
+
+            DialogResult closeResult = DialogResult.OK;
+            if (buttons == MessageBoxButtons.YesNo) closeResult = DialogResult.No;
+            else if (buttons == MessageBoxButtons.YesNoCancel || buttons == MessageBoxButtons.OKCancel || buttons == MessageBoxButtons.RetryCancel) closeResult = DialogResult.Cancel;
+            else if (buttons == MessageBoxButtons.AbortRetryIgnore) closeResult = DialogResult.Ignore;
+
+            int buttonWidth = Scale(scale, 96);
+            for (int choiceIndex = 0; choiceIndex < choiceLabels.Length; choiceIndex++)
+            {
+                Size labelSize = TextRenderer.MeasureText(choiceLabels[choiceIndex], new Font("Segoe UI Semibold", 9.0f, FontStyle.Bold));
+                buttonWidth = Math.Max(buttonWidth, labelSize.Width + Scale(scale, 28));
+            }
+            int maximumButtonWidth = Math.Max(Scale(scale, 96), (width - Scale(scale, 50)) / Math.Max(1, choiceLabels.Length));
+            buttonWidth = Math.Min(buttonWidth, maximumButtonWidth);
+            int buttonHeight = Scale(scale, 32);
+            int buttonGap = Scale(scale, 9);
+            int totalButtonWidth = (buttonWidth * choiceLabels.Length) + (buttonGap * Math.Max(0, choiceLabels.Length - 1));
+            int buttonX = width - border - Scale(scale, 16) - totalButtonWidth;
+            int buttonY = Scale(scale, 13);
+            Button acceptButton = null;
+            Button cancelButton = null;
+
+            for (int choiceIndex = 0; choiceIndex < choiceLabels.Length; choiceIndex++)
+            {
+                string choiceLabel = choiceLabels[choiceIndex];
+                DialogResult choiceResult = choiceResults[choiceIndex];
+                Button button = new Button();
+                button.Text = choiceLabel;
+                button.DialogResult = choiceResult;
+                button.SetBounds(buttonX, buttonY, buttonWidth, buttonHeight);
+                button.FlatStyle = FlatStyle.Flat;
+                button.FlatAppearance.BorderSize = 1;
+                button.FlatAppearance.BorderColor = borderColor;
+                button.ForeColor = textColor;
+                button.BackColor = surfaceAltColor;
+                button.Font = new Font("Segoe UI Semibold", 9.0f, FontStyle.Bold);
+                button.Cursor = Cursors.Hand;
+                button.UseVisualStyleBackColor = false;
+
+                bool isPrimary = choiceResult == DialogResult.OK || choiceResult == DialogResult.Yes || choiceResult == DialogResult.Retry;
+                if (isPrimary)
+                {
+                    button.BackColor = (choiceResult == DialogResult.Yes && (icon == MessageBoxIcon.Warning || icon == MessageBoxIcon.Error)) ? dangerColor : accentColor;
+                    button.ForeColor = Color.White;
+                    button.FlatAppearance.BorderColor = button.BackColor;
+                    if (acceptButton == null) acceptButton = button;
+                }
+                if (choiceResult == DialogResult.Cancel || (buttons == MessageBoxButtons.YesNo && choiceResult == DialogResult.No))
+                {
+                    cancelButton = button;
+                }
+
+                footerPanel.Controls.Add(button);
+                buttonX += buttonWidth + buttonGap;
+            }
+
+            closeButton.Click += delegate
+            {
+                dialog.DialogResult = closeResult;
+                dialog.Close();
+            };
+            dialog.FormClosing += delegate(object sender, FormClosingEventArgs args)
+            {
+                if (dialog.DialogResult == DialogResult.None) dialog.DialogResult = closeResult;
+            };
+            if (acceptButton != null) dialog.AcceptButton = acceptButton;
+            if (cancelButton != null) dialog.CancelButton = cancelButton;
+            else if (choiceLabels.Length == 1) dialog.CancelButton = footerPanel.Controls[0] as Button;
+
+            dialog.Controls.Add(titlePanel);
+            dialog.Controls.Add(bodyPanel);
+            dialog.Controls.Add(footerPanel);
+
+            try
+            {
+                if (owner != null) return dialog.ShowDialog(owner);
+                return dialog.ShowDialog();
+            }
+            finally
+            {
+                dialog.Dispose();
+                bodyFont.Dispose();
+            }
+        }
+    }
+}
+'@
+    $themedMessageBoxReferences = [AppDomain]::CurrentDomain.GetAssemblies() |
+        Where-Object { -not $_.IsDynamic -and -not [string]::IsNullOrWhiteSpace($_.Location) } |
+        Select-Object -ExpandProperty Location -Unique
+    Add-Type -ReferencedAssemblies $themedMessageBoxReferences -TypeDefinition $themedMessageBoxSource
+}
+
 function Get-UiScale {
     try {
         $graphics = [Drawing.Graphics]::FromHwnd([IntPtr]::Zero)
@@ -133,7 +512,7 @@ function Prompt-WingetRepairOrGitManual {
         [Parameter(Mandatory)]$WingetState
     )
 
-    $choice = [Windows.Forms.MessageBox]::Show(
+    $choice = [JetFuel.ThemedMessageBox]::Show(
         "Git Bash was not found, and JetFUEL cannot install Git automatically because winget/App Installer is missing or broken.`r`n`r`n$($WingetState.Message)`r`n`r`nYes = open Microsoft Store to install/reinstall App Installer (winget)`r`nNo = open Git for Windows download page`r`nCancel = stop",
         "Repair winget or install Git",
         "YesNoCancel",
@@ -220,7 +599,7 @@ function Select-BashForInstall {
 
     $wslBash = Get-WslBashPath
     if ($wslBash) {
-        $choice = [Windows.Forms.MessageBox]::Show(
+        $choice = [JetFuel.ThemedMessageBox]::Show(
             "Git Bash was not found. WSL bash is available.`r`n`r`nYes = install Git for Windows / Git Bash (recommended)`r`nNo = use WSL bash for this run`r`nCancel = stop",
             "Choose bash for JetFUEL",
             "YesNoCancel",
@@ -239,7 +618,7 @@ function Select-BashForInstall {
             Prompt-WingetRepairOrGitManual -WingetState $wingetState
         }
 
-        $choice = [Windows.Forms.MessageBox]::Show(
+        $choice = [JetFuel.ThemedMessageBox]::Show(
             "Git Bash was not found. Install Git for Windows now using winget?",
             "Install Git Bash",
             "YesNo",
@@ -468,7 +847,7 @@ function Invoke-JetFuelCleanup {
 
     $gitInfo = Get-GitForWindowsInstallInfo
     if ($gitInfo) {
-        $choice = [Windows.Forms.MessageBox]::Show(
+        $choice = [JetFuel.ThemedMessageBox]::Show(
             "Uninstall Git for Windows / Git Bash now?`r`n`r`nThis can affect other tools that use Git. SSH keys in your .ssh folder will not be removed.",
             "Uninstall Git Bash?",
             "YesNo",
@@ -561,6 +940,215 @@ function Invoke-JetFuelResponsiveDownload {
     } finally {
         $client.Dispose()
     }
+}
+
+function Get-JetFuelPersistentRoot {
+    if (-not [string]::IsNullOrWhiteSpace($env:APPDATA)) {
+        return (Join-Path $env:APPDATA "JetFUEL")
+    }
+    return (Join-Path ([Environment]::GetFolderPath("MyDocuments")) "JetFUEL")
+}
+
+function Get-JetFuelProfilesRoot {
+    $root = Join-Path (Get-JetFuelPersistentRoot) "Profiles"
+    if (-not (Test-Path -LiteralPath $root)) {
+        [void][IO.Directory]::CreateDirectory($root)
+    }
+    return $root
+}
+
+function Protect-JetFuelProfileSecret {
+    param([AllowNull()][AllowEmptyString()][string]$Value)
+
+    if ([string]::IsNullOrEmpty($Value)) { return $null }
+    try { Add-Type -AssemblyName System.Security -ErrorAction Stop } catch {}
+    $entropy = [Text.Encoding]::UTF8.GetBytes("JetFUEL.Profile.v1")
+    $plainBytes = [Text.Encoding]::UTF8.GetBytes($Value)
+    try {
+        $protectedBytes = [Security.Cryptography.ProtectedData]::Protect(
+            $plainBytes,
+            $entropy,
+            [Security.Cryptography.DataProtectionScope]::CurrentUser
+        )
+        return [Convert]::ToBase64String($protectedBytes)
+    } finally {
+        [Array]::Clear($plainBytes, 0, $plainBytes.Length)
+    }
+}
+
+function Unprotect-JetFuelProfileSecret {
+    param([AllowNull()][AllowEmptyString()][string]$Value)
+
+    if ([string]::IsNullOrWhiteSpace($Value)) { return "" }
+    try { Add-Type -AssemblyName System.Security -ErrorAction Stop } catch {}
+    $entropy = [Text.Encoding]::UTF8.GetBytes("JetFUEL.Profile.v1")
+    $protectedBytes = [Convert]::FromBase64String($Value)
+    $plainBytes = [Security.Cryptography.ProtectedData]::Unprotect(
+        $protectedBytes,
+        $entropy,
+        [Security.Cryptography.DataProtectionScope]::CurrentUser
+    )
+    try {
+        return [Text.Encoding]::UTF8.GetString($plainBytes)
+    } finally {
+        [Array]::Clear($plainBytes, 0, $plainBytes.Length)
+    }
+}
+
+function ConvertTo-JetFuelProfileFileName {
+    param([Parameter(Mandatory)][string]$Name)
+
+    $safeName = $Name.Trim()
+    foreach ($character in [IO.Path]::GetInvalidFileNameChars()) {
+        $safeName = $safeName.Replace([string]$character, "_")
+    }
+    $safeName = ($safeName -replace '\s+', ' ').Trim().TrimEnd('.')
+    if ([string]::IsNullOrWhiteSpace($safeName)) {
+        throw "Enter a profile name containing at least one valid filename character."
+    }
+    if ($safeName.Length -gt 80) { $safeName = $safeName.Substring(0, 80).Trim() }
+    return "$safeName.json"
+}
+
+function Get-JetFuelSavedProfiles {
+    $profiles = @()
+    foreach ($file in @(Get-ChildItem -LiteralPath (Get-JetFuelProfilesRoot) -Filter "*.json" -File -ErrorAction SilentlyContinue)) {
+        try {
+            $profile = Get-Content -LiteralPath $file.FullName -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            $displayName = [string]$profile.Name
+            if ([string]::IsNullOrWhiteSpace($displayName)) { $displayName = $file.BaseName }
+            $profiles += [pscustomobject]@{
+                Name       = $displayName
+                Path       = $file.FullName
+                SavedAtUtc = [string]$profile.SavedAtUtc
+            }
+        } catch {
+            # Ignore malformed files here; loading reports a precise error if selected directly.
+        }
+    }
+    return @($profiles | Sort-Object Name)
+}
+
+function Save-JetFuelSessionProfile {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)]$Profile
+    )
+
+    $trimmedName = $Name.Trim()
+    if ([string]::IsNullOrWhiteSpace($trimmedName)) { throw "Enter a profile name." }
+    $Profile | Add-Member -NotePropertyName SchemaVersion -NotePropertyValue 1 -Force
+    $Profile | Add-Member -NotePropertyName Name -NotePropertyValue $trimmedName -Force
+    $Profile | Add-Member -NotePropertyName SavedAtUtc -NotePropertyValue ((Get-Date).ToUniversalTime().ToString("o")) -Force
+
+    $path = Join-Path (Get-JetFuelProfilesRoot) (ConvertTo-JetFuelProfileFileName -Name $trimmedName)
+    $temporaryPath = "$path.tmp"
+    $json = $Profile | ConvertTo-Json -Depth 8
+    [IO.File]::WriteAllText($temporaryPath, $json, [Text.UTF8Encoding]::new($false))
+    if (Test-Path -LiteralPath $path) { [IO.File]::Delete($path) }
+    [IO.File]::Move($temporaryPath, $path)
+    return $path
+}
+
+function Read-JetFuelSessionProfile {
+    param([Parameter(Mandatory)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "Saved profile was not found: $Path" }
+    $profile = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    if ([int]$profile.SchemaVersion -ne 1) { throw "This profile uses an unsupported schema version." }
+    return $profile
+}
+
+function Show-JetFuelProfileNameDialog {
+    param(
+        [Parameter(Mandatory)][Windows.Forms.IWin32Window]$Owner,
+        [string]$SuggestedName = ""
+    )
+
+    $dialog = [Windows.Forms.Form]::new()
+    $dialog.Text = "Save JetFUEL session"
+    $dialog.StartPosition = "CenterParent"
+    $dialog.FormBorderStyle = "FixedDialog"
+    $dialog.MaximizeBox = $false
+    $dialog.MinimizeBox = $false
+    $dialog.ClientSize = [Drawing.Size]::new(430, 146)
+    $dialog.Font = [Drawing.Font]::new("Segoe UI", 9)
+
+    $label = [Windows.Forms.Label]::new()
+    $label.Text = "Name this reusable deployment profile:"
+    $label.SetBounds(16, 14, 395, 22)
+    $nameBox = [Windows.Forms.TextBox]::new()
+    $nameBox.Text = $SuggestedName
+    $nameBox.SetBounds(16, 40, 395, 25)
+    $note = [Windows.Forms.Label]::new()
+    $note.Text = "Web UI passwords are optional DPAPI ciphertext; other secrets are never stored."
+    $note.SetBounds(16, 70, 395, 20)
+    $note.ForeColor = [Drawing.Color]::DimGray
+    $saveButton = [Windows.Forms.Button]::new()
+    $saveButton.Text = "Save and close"
+    $saveButton.SetBounds(204, 102, 120, 30)
+    $saveButton.DialogResult = [Windows.Forms.DialogResult]::OK
+    $cancelButton = [Windows.Forms.Button]::new()
+    $cancelButton.Text = "Cancel"
+    $cancelButton.SetBounds(331, 102, 80, 30)
+    $cancelButton.DialogResult = [Windows.Forms.DialogResult]::Cancel
+    $dialog.AcceptButton = $saveButton
+    $dialog.CancelButton = $cancelButton
+    $dialog.Controls.AddRange(@($label, $nameBox, $note, $saveButton, $cancelButton))
+    $dialog.Add_Shown({ $nameBox.SelectAll(); $nameBox.Focus() })
+
+    try {
+        if ($dialog.ShowDialog($Owner) -ne [Windows.Forms.DialogResult]::OK) { return $null }
+        return $nameBox.Text.Trim()
+    } finally {
+        $dialog.Dispose()
+    }
+}
+
+function New-JetFuelDesktopShortcut {
+    $persistentRoot = Get-JetFuelPersistentRoot
+    $launcherRoot = Join-Path $persistentRoot "Launcher"
+    [void][IO.Directory]::CreateDirectory($launcherRoot)
+
+    $launcherPath = Join-Path $launcherRoot "Launch-JetFUEL.ps1"
+    $launcher = @'
+#Requires -Version 5.1
+$ErrorActionPreference = "Stop"
+$installerUri = "https://raw.githubusercontent.com/GoblinRules/JetFUEL/main/Install-JetFuel.ps1"
+$localScript = Join-Path $env:LOCALAPPDATA "JetFUEL\JetFuel.ps1"
+try {
+    $source = (Invoke-WebRequest -UseBasicParsing -Uri $installerUri -TimeoutSec 30).Content
+    & ([scriptblock]::Create($source))
+} catch {
+    if (Test-Path -LiteralPath $localScript -PathType Leaf) {
+        & $localScript
+    } else {
+        Add-Type -AssemblyName System.Windows.Forms
+        [Windows.Forms.MessageBox]::Show("JetFUEL could not download its launcher and no local copy is available.`r`n`r`n$($_.Exception.Message)", "JetFUEL", "OK", "Error") | Out-Null
+        exit 1
+    }
+}
+'@
+    [IO.File]::WriteAllText($launcherPath, $launcher, [Text.UTF8Encoding]::new($false))
+
+    $sourceIcon = Join-Path (Get-JetFuelScriptRoot) "assets\icon.ico"
+    $iconPath = Join-Path $launcherRoot "JetFUEL.ico"
+    if (Test-Path -LiteralPath $sourceIcon -PathType Leaf) {
+        [IO.File]::Copy($sourceIcon, $iconPath, $true)
+    }
+
+    $desktopPath = [Environment]::GetFolderPath("Desktop")
+    if ([string]::IsNullOrWhiteSpace($desktopPath)) { throw "Windows could not resolve the current user's Desktop folder." }
+    $shortcutPath = Join-Path $desktopPath "JetFUEL.lnk"
+    $shell = New-Object -ComObject WScript.Shell
+    $shortcut = $shell.CreateShortcut($shortcutPath)
+    $shortcut.TargetPath = (Join-Path $PSHOME "powershell.exe")
+    $shortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$launcherPath`""
+    $shortcut.WorkingDirectory = $launcherRoot
+    $shortcut.Description = "Launch the latest JetFUEL setup wizard"
+    if (Test-Path -LiteralPath $iconPath -PathType Leaf) { $shortcut.IconLocation = "$iconPath,0" }
+    $shortcut.Save()
+    return $shortcutPath
 }
 
 function Get-JetFuelFileSha256 {
@@ -1644,6 +2232,132 @@ function Test-JetKvmWebUi {
     }
 }
 
+function Get-JetFuelPrimaryIPv4Subnet {
+    $candidates = @()
+    try {
+        $defaultIndexes = @(
+            Get-NetRoute -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue |
+                Sort-Object RouteMetric, InterfaceMetric |
+                Select-Object -ExpandProperty ifIndex -Unique
+        )
+        foreach ($address in @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop)) {
+            if (
+                $address.IPAddress -eq "127.0.0.1" -or
+                $address.IPAddress -like "169.254.*" -or
+                $address.IPAddress -like "100.*"
+            ) { continue }
+
+            $score = 0
+            if ($defaultIndexes -contains $address.InterfaceIndex) { $score += 100 }
+            if ($address.AddressState -eq "Preferred") { $score += 25 }
+            $candidates += [pscustomobject]@{
+                IPAddress      = [string]$address.IPAddress
+                InterfaceIndex = [int]$address.InterfaceIndex
+                Score          = $score
+            }
+        }
+    } catch {}
+
+    if ($candidates.Count -eq 0) {
+        foreach ($networkInterface in [Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()) {
+            if ($networkInterface.OperationalStatus -ne [Net.NetworkInformation.OperationalStatus]::Up) { continue }
+            if ($networkInterface.NetworkInterfaceType -in @(
+                [Net.NetworkInformation.NetworkInterfaceType]::Loopback,
+                [Net.NetworkInformation.NetworkInterfaceType]::Tunnel
+            )) { continue }
+            foreach ($address in $networkInterface.GetIPProperties().UnicastAddresses) {
+                if ($address.Address.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork) { continue }
+                $ip = $address.Address.ToString()
+                if ($ip -eq "127.0.0.1" -or $ip -like "169.254.*" -or $ip -like "100.*") { continue }
+                $candidates += [pscustomobject]@{ IPAddress = $ip; InterfaceIndex = 0; Score = 0 }
+            }
+        }
+    }
+
+    $selected = $candidates | Sort-Object Score -Descending | Select-Object -First 1
+    if (-not $selected) { throw "No active local IPv4 network was found to scan." }
+    $octets = $selected.IPAddress.Split('.')
+    if ($octets.Count -ne 4) { throw "The active IPv4 address '$($selected.IPAddress)' is not valid." }
+    return [pscustomobject]@{
+        LocalAddress = $selected.IPAddress
+        NetworkBase  = "$($octets[0]).$($octets[1]).$($octets[2])"
+        DisplayName  = "$($octets[0]).$($octets[1]).$($octets[2]).0/24"
+    }
+}
+
+function Find-JetKvmOnLocalNetwork {
+    param([scriptblock]$Log)
+
+    $subnet = Get-JetFuelPrimaryIPv4Subnet
+    if ($Log) { & $Log "Scanning $($subnet.DisplayName) for JetKVM devices. This is a one-time manual scan." }
+
+    $probes = New-Object System.Collections.Generic.List[object]
+    for ($hostNumber = 1; $hostNumber -le 254; $hostNumber++) {
+        $ip = "$($subnet.NetworkBase).$hostNumber"
+        $client = [Net.Sockets.TcpClient]::new()
+        try {
+            $async = $client.BeginConnect($ip, 80, $null, $null)
+            $probes.Add([pscustomobject]@{ IPAddress = $ip; Client = $client; Async = $async; Processed = $false }) | Out-Null
+        } catch {
+            $client.Dispose()
+        }
+    }
+
+    $openAddresses = New-Object System.Collections.Generic.List[string]
+    $deadline = [DateTime]::UtcNow.AddMilliseconds(1600)
+    do {
+        $pending = 0
+        foreach ($probe in $probes) {
+            if ($probe.Processed) { continue }
+            if ($probe.Async.IsCompleted) {
+                $probe.Processed = $true
+                try {
+                    $probe.Client.EndConnect($probe.Async)
+                    if ($probe.Client.Connected) { $openAddresses.Add($probe.IPAddress) | Out-Null }
+                } catch {} finally {
+                    $probe.Client.Dispose()
+                }
+            } else {
+                $pending++
+            }
+        }
+        [Windows.Forms.Application]::DoEvents()
+        if ($pending -gt 0) { Start-Sleep -Milliseconds 20 }
+    } while ($pending -gt 0 -and [DateTime]::UtcNow -lt $deadline)
+
+    foreach ($probe in $probes) {
+        if (-not $probe.Processed) {
+            try { $probe.Client.Dispose() } catch {}
+        }
+    }
+
+    $results = New-Object System.Collections.Generic.List[object]
+    foreach ($ip in $openAddresses) {
+        try {
+            $response = Invoke-WebRequest -UseBasicParsing -Uri "http://$ip/device/status" -TimeoutSec 2 -ErrorAction Stop
+            if ($response.StatusCode -ne 200 -or [string]::IsNullOrWhiteSpace([string]$response.Content)) { continue }
+            $status = $response.Content | ConvertFrom-Json -ErrorAction Stop
+            if (-not $status.PSObject.Properties["isSetup"]) { continue }
+
+            $name = $ip
+            try {
+                $dnsTask = [Net.Dns]::GetHostEntryAsync($ip)
+                if ($dnsTask.Wait(500) -and $dnsTask.Result.HostName) { $name = [string]$dnsTask.Result.HostName }
+            } catch {}
+            $displayName = if ($name -eq $ip) { $ip } else { "$name ($ip)" }
+            $results.Add([pscustomobject]@{
+                Name        = $name
+                IPAddress   = $ip
+                IsSetup     = [bool]$status.isSetup
+                DisplayName = $displayName
+            }) | Out-Null
+            if ($Log) { & $Log "[OK] Found JetKVM: $displayName" }
+        } catch {}
+    }
+
+    return @($results | Sort-Object DisplayName)
+}
+
 function Test-JetKvmSshLogin {
     param(
         [Parameter(Mandatory)][string]$JetKvmAddress,
@@ -1939,6 +2653,72 @@ else
   echo '[OK] no crashdump directory exists'
 fi
 '@
+}
+
+function Get-TailscaleIPv4FromText {
+    param([AllowNull()][AllowEmptyString()][string]$Text)
+
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $null }
+    foreach ($match in [regex]::Matches($Text, '(?<![0-9])100\.(?:6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])(?:\.[0-9]{1,3}){2}(?![0-9])')) {
+        $parsed = $null
+        if ([Net.IPAddress]::TryParse($match.Value, [ref]$parsed)) {
+            return $parsed.ToString()
+        }
+    }
+    return $null
+}
+
+function Get-JetKvmRuntimeIdentity {
+    param(
+        [Parameter(Mandatory)][string]$JetKvmAddress,
+        [Parameter(Mandatory)][string]$KeyPath
+    )
+
+    $script = @'
+sku="$(cat /etc/jetkvm-sku 2>/dev/null || true)"
+[ -n "$sku" ] || sku='unknown'
+system_version="$(cat /version 2>/dev/null || printf unknown)"
+app_version='unknown'
+if command -v wget >/dev/null 2>&1; then
+  app_version="$(wget -qO- http://127.0.0.1/metrics 2>/dev/null | sed -n 's/^jetkvm_build_info{.*version="\([^"]*\)".*/\1/p' | head -n 1)"
+fi
+[ -n "$app_version" ] || app_version='unknown'
+tailscale_ip=''
+if command -v tailscale >/dev/null 2>&1; then
+  if command -v timeout >/dev/null 2>&1; then
+    tailscale_ip="$(timeout 6 tailscale ip -4 2>/dev/null | head -n 1)"
+  else
+    tailscale_ip="$(tailscale ip -4 2>/dev/null | head -n 1)"
+  fi
+fi
+printf 'JETFUEL_RUNTIME_SKU=%s\n' "$sku"
+printf 'JETFUEL_RUNTIME_APP_VERSION=%s\n' "$app_version"
+printf 'JETFUEL_RUNTIME_SYSTEM_VERSION=%s\n' "$system_version"
+printf 'JETFUEL_RUNTIME_TAILSCALE_IP=%s\n' "$tailscale_ip"
+'@
+    $command = ConvertTo-JetKvmEncodedShellCommand -Script $script
+    $result = Invoke-JetKvmSshCommand -JetKvmAddress $JetKvmAddress -KeyPath $KeyPath -Command $command -TimeoutSeconds 14
+    if ($result.TimedOut -or $result.ExitCode -ne 0) {
+        return [pscustomobject]@{ Ok = $false; Message = "Runtime identity query did not complete"; Sku = ""; AppVersion = ""; SystemVersion = ""; TailscaleIp = "" }
+    }
+
+    $values = @{}
+    foreach ($line in ((Remove-AnsiEscapeSequences -Text $result.Output) -split "`n")) {
+        if ($line -match '^JETFUEL_RUNTIME_([A-Z_]+)=(.*)$') {
+            $values[$Matches[1]] = $Matches[2].Trim()
+        }
+    }
+    if (-not $values.ContainsKey("SKU")) {
+        return [pscustomobject]@{ Ok = $false; Message = "Runtime identity response was incomplete"; Sku = ""; AppVersion = ""; SystemVersion = ""; TailscaleIp = "" }
+    }
+    return [pscustomobject]@{
+        Ok            = $true
+        Message       = "OK"
+        Sku           = [string]$values["SKU"]
+        AppVersion    = [string]$values["APP_VERSION"]
+        SystemVersion = [string]$values["SYSTEM_VERSION"]
+        TailscaleIp   = [string]$values["TAILSCALE_IP"]
+    }
 }
 
 function Get-JetKvmInventory {
@@ -3716,7 +4496,7 @@ function Open-TailscaleLoginUrlFromText {
 
     $url = $match.Value.TrimEnd('.', ',', ';', ')', ']')
     & $Log "Tailscale login URL detected: $url"
-    $answer = [Windows.Forms.MessageBox]::Show(
+    $answer = [JetFuel.ThemedMessageBox]::Show(
         "Tailscale needs browser authentication. Open the login page now?`r`n`r`n$url",
         "Tailscale login required",
         "YesNo",
@@ -4174,7 +4954,7 @@ function Start-JetFuelGui {
 
     $openAction = {
         try { Open-JetKvmUi -JetKvmAddress $ipBox.Text }
-        catch { [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null }
+        catch { [JetFuel.ThemedMessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null }
     }
     $openUiButton.Add_Click($openAction)
     $openUiButton2.Add_Click($openAction)
@@ -4190,7 +4970,7 @@ function Start-JetFuelGui {
             [Windows.Forms.Clipboard]::SetText($pub)
             & $log "Public key copied to clipboard. Paste it into JetKVM Settings > Advanced > Developer Mode."
         } catch {
-            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null
+            [JetFuel.ThemedMessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null
         }
     })
 
@@ -4268,7 +5048,7 @@ function Start-JetFuelGui {
                 Assert-TailscaleAuthKeyLooksUsable -AuthKey $authKey
             }
             if ($useAuthKeyCheck.Checked -and $authKey -notmatch '^tskey-auth-') {
-                $answer = [Windows.Forms.MessageBox]::Show(
+                $answer = [JetFuel.ThemedMessageBox]::Show(
                     "This does not look like a Tailscale auth key. Auth keys usually start with tskey-auth-. Continue anyway?",
                     "JetFUEL",
                     "YesNo",
@@ -4301,7 +5081,6 @@ function Start-JetFuelGui {
                         throw "Timed out waiting for Tailscale login to complete. Complete the browser login, then click Check Tailscale."
                     }
                 }
-
             & $log "Setup complete. Confirm the new device in the Tailscale admin console."
             & $setBusy $false "Complete"
         } catch {
@@ -4310,7 +5089,7 @@ function Start-JetFuelGui {
             if ($_.Exception.Message -match "ssh-keygen") { & $setIndicator $sshStatus "Fail" "SSH key creation failed" }
             elseif ($_.Exception.Message -match "SSH|ssh") { & $setIndicator $sshLoginStatus "Fail" "JetKVM SSH login failed" }
             & $setBusy $false "Failed"
-            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null
+            [JetFuel.ThemedMessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null
         }
     }
 
@@ -4706,10 +5485,10 @@ function Start-JetFuelGuiV2 {
     $setupLayout.AutoScroll = $false
     $setupLayout.BackColor = $ui.Window
     $setupLayout.ColumnCount = 1
-    $setupLayout.RowCount = 4
+    $setupLayout.RowCount = 5
     $setupLayout.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
     # The setup sections size themselves to their content; only the action row is fixed.
-    for ($i = 0; $i -lt 3; $i++) {
+    for ($i = 0; $i -lt 4; $i++) {
         $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::AutoSize)) | Out-Null
     }
     $setupLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, (S 42))) | Out-Null
@@ -4743,7 +5522,7 @@ function Start-JetFuelGuiV2 {
     $desktopLayout.ColumnCount = 1
     $desktopLayout.RowCount = 2
     $desktopLayout.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
-    $desktopLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, (S 112))) | Out-Null
+    $desktopLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, (S 150))) | Out-Null
     $desktopLayout.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
     $desktopPage.Controls.Add($desktopLayout)
 
@@ -4818,6 +5597,7 @@ Setup tab
 1 - Deployment details
 - Enter the JetKVM IP address or hostname.
 - Optionally set the Tailscale device name and provide a full tskey-auth- pre-authentication secret for automatic enrolment.
+- The optional Web UI password can sign the embedded browser in automatically. Select Save securely only if it should be included in a saved profile; Windows DPAPI encrypts it for the current Windows user.
 - Choose the SSH private key path used by the wizard.
 - If the key does not exist, the wizard can create it.
 - Choose whether the SSH key has no passphrase or a passphrase.
@@ -4834,6 +5614,14 @@ Setup tab
 - Checks that this Windows PC has Git Bash, winget, and SSH tools available.
 - Checks whether the JetKVM responds on the network and whether the web UI is reachable.
 - Checks SSH login after you enable Developer Mode and add the public SSH key.
+- After SSH succeeds, reads the JetKVM hardware SKU, app version, system version, and assigned Tailscale IPv4 address. The SKU distinguishes current JetKVM hardware variants where the device exposes it.
+- Open remote UI uses the resolved Tailscale IP to open the same JetKVM Web UI remotely.
+
+Saved deployment profiles
+- The compact picker at the top of Setup can save the current values, load an existing reusable profile, or delete a profile from %APPDATA%\JetFUEL\Profiles.
+- Profiles include addresses, SSH key path/options, installer choices, Tailscale name/version/IP, device defaults, identity/WOL choices, and BIOS-prep selections.
+- Tailscale auth keys, SSH key passphrases, BIOS passwords, logs, generated identities, and SSH key contents are never saved.
+- A Web UI password is included only when Save securely is selected. It is DPAPI-encrypted and can normally be decrypted only by the same Windows user on the same Windows installation.
 
 3 - Developer Mode SSH required
 - Developer Mode SSH must be enabled before the install can run.
@@ -4847,7 +5635,9 @@ Setup tab
 - If no auth key is supplied, the wizard will look for a Tailscale browser login URL and wait for login to complete.
 
 Exit / cleanup
-- The red EXIT button asks whether to exit only, clean up and exit, or cancel.
+- The red EXIT button first offers to name and save the current deployment session, then optionally creates a Desktop launcher using the JetFUEL icon.
+- The launcher is stored under %APPDATA%\JetFUEL\Launcher and downloads the latest main version when opened; it falls back to the local bootstrap copy when available.
+- If the session is not saved, JetFUEL asks whether to exit only, clean up and exit, or cancel.
 - Cleanup removes JetFUEL temp folders, the downloaded %LOCALAPPDATA%\JetFUEL bootstrap copy, the private embedded Web UI support files, and its browser cache.
 - The shared Microsoft Edge WebView2 Runtime is left installed because Windows and other applications may use it.
 - SSH keys are left in place.
@@ -4857,8 +5647,8 @@ Web UI tab
 - Embeds the JetKVM's official web interface directly inside JetFUEL, including video and keyboard/mouse input.
 - Install Web UI downloads a pinned Microsoft WebView2 SDK package, verifies its SHA-256, and installs only JetFUEL's private support DLLs. If the shared Microsoft Edge WebView2 Runtime is missing, JetFUEL downloads Microsoft's signed Evergreen installer.
 - Enter a device address or reuse the Setup address, then select Open. Back, Forward, Refresh, and Open externally provide normal browser controls.
-- JetFUEL connects only to the address you specify. This tab does not scan every address on the local subnet and does not depend on mDNS discovery.
-- JetKVM authentication remains inside the embedded web session. JetFUEL does not collect or store the JetKVM password.
+- Scan network performs one manual scan of the active local /24 and checks responding web servers for JetKVM's /device/status response. It runs only when clicked, never repeats in the background, and does not depend on mDNS.
+- JetKVM authentication remains inside the embedded web session. JetFUEL uses the Setup password only for a same-origin local login request; it is never logged. It is stored only in a saved profile when Save securely is selected, as current-user DPAPI ciphertext.
 - Remove support deletes JetFUEL's private SDK files and browser profile. It does not uninstall the shared Edge WebView2 Runtime or change the JetKVM or SSH keys.
 
 Tailscale tab
@@ -4994,6 +5784,50 @@ Inventory tab
     $setupTips.InitialDelay = 350
     $setupTips.ReshowDelay = 100
 
+    $profilesGroup = New-Group "Saved deployment profiles"
+    & $makeGroupAutoHeight $profilesGroup
+    $profilesGrid = New-StepGrid 1
+    $profilesGrid.ColumnCount = 5
+    $profilesGrid.ColumnStyles.Clear()
+    $profilesGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, (S 125))) | Out-Null
+    $profilesGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
+    foreach ($width in @(118, 118, 118)) {
+        $profilesGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, (S $width))) | Out-Null
+    }
+    $profilesGrid.RowStyles.Clear()
+    $profilesGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, (S 30))) | Out-Null
+    $profilesGroup.Controls.Add($profilesGrid)
+    $profileBox = [Windows.Forms.ComboBox]::new()
+    $profileBox.Dock = "Fill"
+    $profileBox.DropDownStyle = [Windows.Forms.ComboBoxStyle]::DropDownList
+    $profileBox.Margin = New-ScaledPadding 0 2 8 2
+    $profileBox.BackColor = $ui.Input
+    $profileBox.ForeColor = $ui.InputText
+    $profileBox.Font = [Drawing.Font]::new("Segoe UI", 9)
+    $profileBox.DisplayMember = "Name"
+    $loadProfileButton = [Windows.Forms.Button]::new()
+    $loadProfileButton.Text = "Load profile"
+    $loadProfileButton.Dock = "Fill"
+    $loadProfileButton.Margin = New-ScaledPadding 4 1 4 1
+    Set-ButtonStyle $loadProfileButton "Primary"
+    $saveProfileButton = [Windows.Forms.Button]::new()
+    $saveProfileButton.Text = "Save current"
+    $saveProfileButton.Dock = "Fill"
+    $saveProfileButton.Margin = New-ScaledPadding 4 1 4 1
+    Set-ButtonStyle $saveProfileButton "Secondary"
+    $deleteProfileButton = [Windows.Forms.Button]::new()
+    $deleteProfileButton.Text = "Delete profile"
+    $deleteProfileButton.Dock = "Fill"
+    $deleteProfileButton.Margin = New-ScaledPadding 4 1 4 1
+    Set-ButtonStyle $deleteProfileButton "Secondary"
+    $profilesGrid.Controls.Add((New-RowLabel "Saved profile"), 0, 0)
+    $profilesGrid.Controls.Add($profileBox, 1, 0)
+    $profilesGrid.Controls.Add($loadProfileButton, 2, 0)
+    $profilesGrid.Controls.Add($saveProfileButton, 3, 0)
+    $profilesGrid.Controls.Add($deleteProfileButton, 4, 0)
+    $setupTips.SetToolTip($profileBox, "Profiles are stored in %APPDATA%\JetFUEL\Profiles. Web UI passwords are optional DPAPI ciphertext; other secrets and logs are excluded.")
+    $setupLayout.Controls.Add($profilesGroup, 0, 0)
+
     $deploymentGroup = New-Group "1 - Deployment details"
     & $makeGroupAutoHeight $deploymentGroup
     $deploymentColumns = [Windows.Forms.TableLayoutPanel]::new()
@@ -5007,7 +5841,7 @@ Inventory tab
     $deploymentColumns.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 50)) | Out-Null
     $deploymentGroup.Controls.Add($deploymentColumns)
 
-    $connectionGrid = New-StepGrid 4
+    $connectionGrid = New-StepGrid 5
     # Keep the shorter SSH grid pinned to the top instead of stretching its
     # final row to match the taller Tailscale grid beside it.
     $connectionGrid.Dock = "Top"
@@ -5017,7 +5851,7 @@ Inventory tab
     $connectionGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
     $connectionGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, (S 124))) | Out-Null
     $connectionGrid.RowStyles.Clear()
-    foreach ($height in @(27, 27, 25, 27)) {
+    foreach ($height in @(27, 27, 25, 27, 27)) {
         $connectionGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, (S $height))) | Out-Null
     }
     $ipBox = New-Field ""
@@ -5025,6 +5859,8 @@ Inventory tab
     $passBox = New-Field ""
     $passBox.UseSystemPasswordChar = $true
     $passBox.Enabled = $false
+    $webPasswordBox = New-Field ""
+    $webPasswordBox.UseSystemPasswordChar = $true
     $openUiButton = [Windows.Forms.Button]::new()
     $openUiButton.Text = "Open UI"
     $openUiButton.Dock = "Fill"
@@ -5045,6 +5881,11 @@ Inventory tab
     $noPassCheck.Dock = "Fill"
     $noPassCheck.AutoEllipsis = $true
     Set-CheckStyle $noPassCheck
+    $saveWebPasswordCheck = [Windows.Forms.CheckBox]::new()
+    $saveWebPasswordCheck.Text = "Save securely"
+    $saveWebPasswordCheck.Dock = "Fill"
+    $saveWebPasswordCheck.AutoEllipsis = $true
+    Set-CheckStyle $saveWebPasswordCheck
     $setupTips.SetToolTip($noPassCheck, "Use no passphrase for the SSH private key.")
     $connectionGrid.Controls.Add((New-RowLabel "JetKVM address"), 0, 0)
     $connectionGrid.Controls.Add($ipBox, 1, 0)
@@ -5057,17 +5898,20 @@ Inventory tab
     $connectionGrid.Controls.Add((New-RowLabel "Key passphrase"), 0, 3)
     $connectionGrid.Controls.Add($passBox, 1, 3)
     $connectionGrid.Controls.Add($noPassCheck, 2, 3)
+    $connectionGrid.Controls.Add((New-RowLabel "Web UI password"), 0, 4)
+    $connectionGrid.Controls.Add($webPasswordBox, 1, 4)
+    $connectionGrid.Controls.Add($saveWebPasswordCheck, 2, 4)
     $deploymentColumns.Controls.Add($connectionGrid, 0, 0)
 
-    $tailscaleGrid = New-StepGrid 5
+    $tailscaleGrid = New-StepGrid 6
     $tailscaleGrid.Dock = "Top"
     $tailscaleGrid.Padding = New-ScaledPadding 8 0 0 0
     $tailscaleGrid.ColumnStyles.Clear()
     $tailscaleGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, (S 120))) | Out-Null
     $tailscaleGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
-    $tailscaleGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, (S 4))) | Out-Null
+    $tailscaleGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, (S 124))) | Out-Null
     $tailscaleGrid.RowStyles.Clear()
-    foreach ($height in @(27, 25, 27, 27, 27)) {
+    foreach ($height in @(27, 25, 27, 27, 27, 27)) {
         $tailscaleGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, (S $height))) | Out-Null
     }
     $installerSourceBox = [Windows.Forms.ComboBox]::new()
@@ -5094,6 +5938,14 @@ Inventory tab
     $authBox.Enabled = $false
     $hostBox = New-Field ""
     $versionBox = New-Field "1.96.4"
+    $tailscaleIpBox = New-Field ""
+    $tailscaleIpBox.ReadOnly = $true
+    $tailscaleIpBox.TabStop = $false
+    $openRemoteUiButton = [Windows.Forms.Button]::new()
+    $openRemoteUiButton.Text = "Open remote UI"
+    $openRemoteUiButton.Dock = "Fill"
+    $openRemoteUiButton.Enabled = $false
+    Set-ButtonStyle $openRemoteUiButton "Secondary"
     $installOptions = [Windows.Forms.TableLayoutPanel]::new()
     $installOptions.Dock = "Fill"
     $installOptions.Margin = [Windows.Forms.Padding]::new(0)
@@ -5117,6 +5969,9 @@ Inventory tab
     $tailscaleGrid.Controls.Add((New-RowLabel "Tailscale version"), 0, 4)
     $tailscaleGrid.Controls.Add($versionBox, 1, 4)
     $tailscaleGrid.SetColumnSpan($versionBox, 2)
+    $tailscaleGrid.Controls.Add((New-RowLabel "Tailscale IP"), 0, 5)
+    $tailscaleGrid.Controls.Add($tailscaleIpBox, 1, 5)
+    $tailscaleGrid.Controls.Add($openRemoteUiButton, 2, 5)
     $deploymentColumns.Controls.Add($tailscaleGrid, 1, 0)
     $setupTips.SetToolTip($ipBox, "Enter the JetKVM IPv4 address or resolvable hostname.")
     $setupTips.SetToolTip($keyBox, "Private SSH key used for Developer Mode access. SSH key files are retained during cleanup.")
@@ -5127,11 +5982,14 @@ Inventory tab
     $setupTips.SetToolTip($cleanCheck, "Remove the existing Tailscale state and create a new machine identity.")
     $setupTips.SetToolTip($installerSourceBox, "Official JetKVM is the default. See Settings for reference, custom URL, and local-file details.")
     $setupTips.SetToolTip($versionBox, "Pinned for JetKVM compatibility. Change only when you have verified another version.")
-    $setupLayout.Controls.Add($deploymentGroup, 0, 0)
+    $setupTips.SetToolTip($webPasswordBox, "Optional local JetKVM Web UI password used to sign in inside JetFUEL. It is never logged.")
+    $setupTips.SetToolTip($saveWebPasswordCheck, "Store this Web UI password in saved profiles using Windows DPAPI for the current Windows user.")
+    $setupTips.SetToolTip($tailscaleIpBox, "Resolved directly from the JetKVM after SSH preflight, install, check, or repair.")
+    $setupLayout.Controls.Add($deploymentGroup, 0, 1)
 
     $precheckGroup = New-Group "2 - Preflight checks"
     & $makeGroupAutoHeight $precheckGroup
-    $preGrid = New-StepGrid 2
+    $preGrid = New-StepGrid 3
     $preGrid.ColumnCount = 4
     $preGrid.ColumnStyles.Clear()
     foreach ($percent in @(23, 25, 29)) {
@@ -5139,7 +5997,7 @@ Inventory tab
     }
     $preGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, (S 132))) | Out-Null
     $preGrid.RowStyles.Clear()
-    foreach ($height in @(22, 22)) {
+    foreach ($height in @(22, 22, 22)) {
         $preGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, (S $height))) | Out-Null
     }
     $precheckGroup.Controls.Add($preGrid)
@@ -5149,9 +6007,13 @@ Inventory tab
     $sshLoginStatus = New-RowLabel "[ ] SSH login: enable Developer Mode first"
     $kvmStatus = New-RowLabel "[ ] JetKVM network: not checked"
     $httpStatus = New-RowLabel "[ ] JetKVM web UI: not checked"
-    foreach ($label in @($bashStatus, $sshStatus, $wingetStatus, $sshLoginStatus, $kvmStatus, $httpStatus)) {
+    $deviceVersionStatus = New-RowLabel "[ ] JetKVM model/version: not checked"
+    $tailscaleIpStatus = New-RowLabel "[ ] Tailscale IP: not checked"
+    foreach ($label in @($bashStatus, $sshStatus, $wingetStatus, $sshLoginStatus, $kvmStatus, $httpStatus, $deviceVersionStatus, $tailscaleIpStatus)) {
         $label.AutoEllipsis = $true
     }
+    $setupTips.SetToolTip($deviceVersionStatus, "After SSH preflight this shows the exact hardware SKU plus JetKVM app and system versions.")
+    $setupTips.SetToolTip($tailscaleIpStatus, "After SSH preflight this shows the JetKVM's assigned Tailscale IPv4 address, when available.")
     $preflightButton = [Windows.Forms.Button]::new()
     $preflightButton.Text = "Run preflight"
     $preflightButton.Dock = "Fill"
@@ -5163,9 +6025,12 @@ Inventory tab
     $preGrid.Controls.Add($sshStatus, 0, 1)
     $preGrid.Controls.Add($httpStatus, 1, 1)
     $preGrid.Controls.Add($wingetStatus, 2, 1)
+    $preGrid.Controls.Add($deviceVersionStatus, 0, 2)
+    $preGrid.SetColumnSpan($deviceVersionStatus, 2)
+    $preGrid.Controls.Add($tailscaleIpStatus, 2, 2)
     $preGrid.Controls.Add($preflightButton, 3, 0)
-    $preGrid.SetRowSpan($preflightButton, 2)
-    $setupLayout.Controls.Add($precheckGroup, 0, 1)
+    $preGrid.SetRowSpan($preflightButton, 3)
+    $setupLayout.Controls.Add($precheckGroup, 0, 2)
 
     $manualSteps = New-Group "3 - Developer Mode SSH required"
     & $makeGroupAutoHeight $manualSteps
@@ -5203,7 +6068,7 @@ Inventory tab
     $manualGrid.SetColumnSpan($securityText, 2)
     $manualGrid.Controls.Add($copyKeyButton, 2, 0)
     $manualGrid.Controls.Add($openUiButton2, 2, 1)
-    $setupLayout.Controls.Add($manualSteps, 0, 2)
+    $setupLayout.Controls.Add($manualSteps, 0, 3)
 
     $statusLabel = [Windows.Forms.Label]::new()
     $statusLabel.Text = "Ready"
@@ -5225,7 +6090,7 @@ Inventory tab
     Set-ButtonStyle $runButton "Primary"
     $setupActionPanel.Controls.Add($statusLabel, 0, 0)
     $setupActionPanel.Controls.Add($runButton, 1, 0)
-    $setupLayout.Controls.Add($setupActionPanel, 0, 3)
+    $setupLayout.Controls.Add($setupActionPanel, 0, 4)
 
     $desktopToolbarGroup = New-Group "Embedded JetKVM Web UI"
     $desktopToolbarGroup.Dock = "Fill"
@@ -5233,12 +6098,13 @@ Inventory tab
     $desktopToolbarGrid.Dock = "Fill"
     $desktopToolbarGrid.Padding = New-ScaledPadding 8 5 8 5
     $desktopToolbarGrid.ColumnCount = 7
-    $desktopToolbarGrid.RowCount = 2
+    $desktopToolbarGrid.RowCount = 3
     $desktopToolbarGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, (S 92))) | Out-Null
     $desktopToolbarGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
     foreach ($width in @(76, 48, 48, 76, 132)) {
         $desktopToolbarGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, (S $width))) | Out-Null
     }
+    $desktopToolbarGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, (S 36))) | Out-Null
     $desktopToolbarGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Absolute, (S 36))) | Out-Null
     $desktopToolbarGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
 
@@ -5276,6 +6142,30 @@ Inventory tab
     $webExternalButton.Margin = New-ScaledPadding 0 2 0 2
     Set-ButtonStyle $webExternalButton "Secondary"
 
+    $discoveryLabel = New-RowLabel "Network discovery"
+    $discoveryLabel.Dock = "Fill"
+    $discoveryLabel.TextAlign = "MiddleLeft"
+    $discoveredDeviceBox = [Windows.Forms.ComboBox]::new()
+    $discoveredDeviceBox.Dock = "Fill"
+    $discoveredDeviceBox.DropDownStyle = [Windows.Forms.ComboBoxStyle]::DropDownList
+    $discoveredDeviceBox.DisplayMember = "DisplayName"
+    $discoveredDeviceBox.Margin = New-ScaledPadding 0 3 8 3
+    $discoveredDeviceBox.BackColor = $ui.Input
+    $discoveredDeviceBox.ForeColor = $ui.InputText
+    $discoveredDeviceBox.Font = [Drawing.Font]::new("Segoe UI", 9)
+    $scanNetworkButton = [Windows.Forms.Button]::new()
+    $scanNetworkButton.Text = "Scan network"
+    $scanNetworkButton.Dock = "Fill"
+    $scanNetworkButton.Margin = New-ScaledPadding 0 2 4 2
+    Set-ButtonStyle $scanNetworkButton "Secondary"
+    $useDiscoveredButton = [Windows.Forms.Button]::new()
+    $useDiscoveredButton.Text = "Use selected"
+    $useDiscoveredButton.Dock = "Fill"
+    $useDiscoveredButton.Margin = New-ScaledPadding 0 2 0 2
+    $useDiscoveredButton.Enabled = $false
+    Set-ButtonStyle $useDiscoveredButton "Secondary"
+    $setupTips.SetToolTip($scanNetworkButton, "Manually probe the active local /24 once for JetKVM /device/status responses. JetFUEL does not scan in the background.")
+
     $desktopStatusLabel = New-RowLabel "Checking embedded browser support..."
     $desktopStatusLabel.Dock = "Fill"
     $desktopStatusLabel.TextAlign = "MiddleLeft"
@@ -5298,10 +6188,17 @@ Inventory tab
     $desktopToolbarGrid.Controls.Add($webForwardButton, 4, 0)
     $desktopToolbarGrid.Controls.Add($webRefreshButton, 5, 0)
     $desktopToolbarGrid.Controls.Add($webExternalButton, 6, 0)
-    $desktopToolbarGrid.Controls.Add($desktopStatusLabel, 0, 1)
-    $desktopToolbarGrid.SetColumnSpan($desktopStatusLabel, 5)
-    $desktopToolbarGrid.Controls.Add($installDesktopButton, 5, 1)
-    $desktopToolbarGrid.Controls.Add($removeDesktopButton, 6, 1)
+    $desktopToolbarGrid.Controls.Add($discoveryLabel, 0, 1)
+    $desktopToolbarGrid.Controls.Add($discoveredDeviceBox, 1, 1)
+    $desktopToolbarGrid.SetColumnSpan($discoveredDeviceBox, 3)
+    $desktopToolbarGrid.Controls.Add($scanNetworkButton, 4, 1)
+    $desktopToolbarGrid.SetColumnSpan($scanNetworkButton, 2)
+    $desktopToolbarGrid.Controls.Add($useDiscoveredButton, 6, 1)
+    $desktopToolbarGrid.Controls.Add($desktopStatusLabel, 0, 2)
+    $desktopToolbarGrid.SetColumnSpan($desktopStatusLabel, 4)
+    $desktopToolbarGrid.Controls.Add($installDesktopButton, 4, 2)
+    $desktopToolbarGrid.SetColumnSpan($installDesktopButton, 2)
+    $desktopToolbarGrid.Controls.Add($removeDesktopButton, 6, 2)
     $desktopToolbarGroup.Controls.Add($desktopToolbarGrid)
     $desktopLayout.Controls.Add($desktopToolbarGroup, 0, 0)
 
@@ -5310,7 +6207,7 @@ Inventory tab
     $desktopBrowserHost.Margin = New-ScaledPadding 0 6 0 0
     $desktopBrowserHost.BackColor = $ui.Log
     $desktopPlaceholder = [Windows.Forms.Label]::new()
-    $desktopPlaceholder.Text = "Install the embedded Web UI support, then enter or reuse the Setup device address and select Open.\r\n\r\nJetFUEL connects directly to that address. It does not scan the local subnet."
+    $desktopPlaceholder.Text = "Install the embedded Web UI support, then enter or reuse the Setup device address and select Open.`r`n`r`nUse Scan network for a one-time manual search of the active local /24. JetFUEL never scans in the background."
     $desktopPlaceholder.Dock = "Fill"
     $desktopPlaceholder.TextAlign = "MiddleCenter"
     $desktopPlaceholder.ForeColor = $ui.Muted
@@ -5322,6 +6219,8 @@ Inventory tab
         Control = $null
         Ready = $false
         RemovalPending = $false
+        PendingPassword = ""
+        LoginAttempted = $false
     }
 
     $actionPanel = [Windows.Forms.TableLayoutPanel]::new()
@@ -6322,6 +7221,30 @@ Inventory tab
             if ($eventArgs.IsSuccess) {
                 $desktopStatusLabel.Text = "Connected inside JetFUEL: $($sender.Source.Host)"
                 $desktopStatusLabel.ForeColor = $ui.Good
+                if (-not $webUiState.LoginAttempted -and -not [string]::IsNullOrEmpty([string]$webUiState.PendingPassword)) {
+                    $webUiState.LoginAttempted = $true
+                    $passwordJson = ConvertTo-Json -Compress ([string]$webUiState.PendingPassword)
+                    $webUiState.PendingPassword = ""
+                    $desktopStatusLabel.Text = "Signing in to $($sender.Source.Host) with the saved local Web UI password..."
+                    $loginScript = @"
+(async () => {
+  const response = await fetch('/auth/login-local', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    credentials: 'same-origin',
+    body: JSON.stringify({password: $passwordJson})
+  });
+  if (response.ok) {
+    window.location.href = '/';
+    return 'ok';
+  }
+  const body = await response.text();
+  alert('JetFUEL could not sign in with the saved Web UI password. Enter the password manually. ' + body);
+  return 'failed';
+})();
+"@
+                    [void]$sender.ExecuteScriptAsync($loginScript)
+                }
             } else {
                 $desktopStatusLabel.Text = "Web UI navigation failed: $($eventArgs.WebErrorStatus)"
                 $desktopStatusLabel.ForeColor = $ui.Bad
@@ -6340,6 +7263,8 @@ Inventory tab
         param([string]$Address)
         $uri = Get-JetKvmWebUri -Address $Address
         $browser = & $initialiseEmbeddedWebUi
+        $webUiState.PendingPassword = [string]$webPasswordBox.Text
+        $webUiState.LoginAttempted = $false
         $desktopWebAddressBox.Text = $uri.GetLeftPart([UriPartial]::Authority)
         $browser.Source = $uri
         & $log "Opened the JetKVM Web UI inside JetFUEL for $($uri.Host)."
@@ -6399,6 +7324,18 @@ Inventory tab
     }
     & $refreshDesktopStatus
 
+    $openRemoteUiButton.Add_Click({
+        try {
+            $address = $tailscaleIpBox.Text.Trim()
+            if ([string]::IsNullOrWhiteSpace($address)) { throw "No Tailscale IP is available yet. Run preflight, install, Check Tailscale, or Repair Tailscale first." }
+            & $showPage "Desktop"
+            & $openEmbeddedWebUi $address
+        } catch {
+            & $log ("ERROR: " + $_.Exception.Message)
+            [JetFuel.ThemedMessageBox]::Show($_.Exception.Message, "Open remote JetKVM UI", "OK", "Error") | Out-Null
+        }
+    })
+
     $setBusy = {
         param([bool]$Busy, [string]$Status)
         $runButton.Enabled = -not $Busy
@@ -6406,6 +7343,10 @@ Inventory tab
         $checkTailscaleButton.Enabled = -not $Busy
         $repairTailscaleButton.Enabled = -not $Busy
         $removeTailscaleButton.Enabled = -not $Busy
+        $loadProfileButton.Enabled = (-not $Busy) -and ($profileBox.Items.Count -gt 0)
+        $saveProfileButton.Enabled = -not $Busy
+        $deleteProfileButton.Enabled = (-not $Busy) -and ($profileBox.Items.Count -gt 0)
+        $openRemoteUiButton.Enabled = (-not $Busy) -and -not [string]::IsNullOrWhiteSpace($tailscaleIpBox.Text)
         if ($Busy) {
             $installDesktopButton.Enabled = $false
             $openEmbeddedWebButton.Enabled = $false
@@ -6414,9 +7355,13 @@ Inventory tab
             $webRefreshButton.Enabled = $false
             $webExternalButton.Enabled = $false
             $removeDesktopButton.Enabled = $false
+            $scanNetworkButton.Enabled = $false
+            $useDiscoveredButton.Enabled = $false
         } else {
             & $refreshDesktopStatus
             $webExternalButton.Enabled = $true
+            $scanNetworkButton.Enabled = $true
+            $useDiscoveredButton.Enabled = ($null -ne $discoveredDeviceBox.SelectedItem)
         }
         $refreshMacButton.Enabled = -not $Busy
         $generateMacButton.Enabled = -not $Busy
@@ -6459,8 +7404,46 @@ Inventory tab
         } catch {
             & $log ("ERROR: " + $_.Exception.Message)
             & $setBusy $false "Web UI install failed"
-            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL Web UI", "OK", "Error") | Out-Null
+            [JetFuel.ThemedMessageBox]::Show($_.Exception.Message, "JetFUEL Web UI", "OK", "Error") | Out-Null
         }
+    })
+    $scanNetworkButton.Add_Click({
+        try {
+            & $setBusy $true "Scanning local network..."
+            $desktopStatusLabel.Text = "Scanning the active local /24 once..."
+            $desktopStatusLabel.ForeColor = $ui.Info
+            $discoveredDeviceBox.Items.Clear()
+            $useDiscoveredButton.Enabled = $false
+            $results = @(Find-JetKvmOnLocalNetwork -Log $log)
+            foreach ($device in $results) { [void]$discoveredDeviceBox.Items.Add($device) }
+            & $setBusy $false "Network scan complete"
+            if ($discoveredDeviceBox.Items.Count -gt 0) {
+                $discoveredDeviceBox.SelectedIndex = 0
+                $useDiscoveredButton.Enabled = $true
+                $desktopStatusLabel.Text = "Found $($discoveredDeviceBox.Items.Count) JetKVM device(s). Choose one, then select Use selected or Open."
+                $desktopStatusLabel.ForeColor = $ui.Good
+            } else {
+                $desktopStatusLabel.Text = "No JetKVM devices answered on the active local /24. Enter an address manually if the device is on another subnet."
+                $desktopStatusLabel.ForeColor = $ui.Warn
+                & $log "[WARN] No JetKVM devices were found during the manual local network scan."
+            }
+        } catch {
+            & $log ("ERROR: Network scan failed: " + $_.Exception.Message)
+            & $setBusy $false "Network scan failed"
+            [JetFuel.ThemedMessageBox]::Show($_.Exception.Message, "JetKVM network scan", "OK", "Error") | Out-Null
+        }
+    })
+    $useDiscoveredButton.Add_Click({
+        if (-not $discoveredDeviceBox.SelectedItem) { return }
+        $selectedDevice = $discoveredDeviceBox.SelectedItem
+        $ipBox.Text = [string]$selectedDevice.IPAddress
+        $desktopWebAddressBox.Text = [string]$selectedDevice.IPAddress
+        $desktopStatusLabel.Text = "Selected $($selectedDevice.DisplayName). Select Open to connect inside JetFUEL."
+        $desktopStatusLabel.ForeColor = $ui.Good
+        & $log "Selected discovered JetKVM $($selectedDevice.DisplayName) for this deployment."
+    })
+    $discoveredDeviceBox.Add_SelectedIndexChanged({
+        $useDiscoveredButton.Enabled = ($null -ne $discoveredDeviceBox.SelectedItem)
     })
     $openEmbeddedWebButton.Add_Click({
         try {
@@ -6472,7 +7455,7 @@ Inventory tab
             & $openEmbeddedWebUi $address
         } catch {
             & $log ("ERROR: " + $_.Exception.Message)
-            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL Web UI", "OK", "Error") | Out-Null
+            [JetFuel.ThemedMessageBox]::Show($_.Exception.Message, "JetFUEL Web UI", "OK", "Error") | Out-Null
         }
     })
     $webBackButton.Add_Click({ if ($webUiState.Ready -and $webUiState.Control.CanGoBack) { $webUiState.Control.GoBack() } })
@@ -6486,12 +7469,12 @@ Inventory tab
             Start-Process $uri.AbsoluteUri
         } catch {
             & $log ("ERROR: " + $_.Exception.Message)
-            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL Web UI", "OK", "Error") | Out-Null
+            [JetFuel.ThemedMessageBox]::Show($_.Exception.Message, "JetFUEL Web UI", "OK", "Error") | Out-Null
         }
     })
     $removeDesktopButton.Add_Click({
         try {
-            $answer = [Windows.Forms.MessageBox]::Show(
+            $answer = [JetFuel.ThemedMessageBox]::Show(
                 "Remove JetFUEL's private embedded Web UI support and browser cache?`r`n`r`nThe shared Microsoft Edge WebView2 Runtime, JetKVM devices, and SSH keys are not removed. Loaded files may finish deleting after JetFUEL exits.",
                 "Remove Web UI support",
                 "YesNo",
@@ -6507,7 +7490,7 @@ Inventory tab
         } catch {
             & $log ("ERROR: " + $_.Exception.Message)
             & $setBusy $false "Web UI uninstall failed"
-            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL Web UI", "OK", "Error") | Out-Null
+            [JetFuel.ThemedMessageBox]::Show($_.Exception.Message, "JetFUEL Web UI", "OK", "Error") | Out-Null
         }
     })
 
@@ -6524,6 +7507,52 @@ Inventory tab
             default { $Label.Text = "[ ] $Text"; $Label.ForeColor = $ui.Text }
         }
         [Windows.Forms.Application]::DoEvents()
+    }
+
+    $setResolvedTailscaleIp = {
+        param([AllowNull()][AllowEmptyString()][string]$Value)
+        $resolvedIp = Get-TailscaleIPv4FromText -Text $Value
+        if ($resolvedIp) {
+            $tailscaleIpBox.Text = $resolvedIp
+            $openRemoteUiButton.Enabled = $true
+            & $setIndicator $tailscaleIpStatus "OK" "Tailscale IP: $resolvedIp"
+            return $resolvedIp
+        }
+        return $null
+    }
+
+    $refreshRuntimeIdentity = {
+        param([string]$Address, [string]$KeyPath)
+        try {
+            $runtime = Get-JetKvmRuntimeIdentity -JetKvmAddress $Address -KeyPath $KeyPath
+            if (-not $runtime.Ok) {
+                & $setIndicator $deviceVersionStatus "Warn" "JetKVM model/version unavailable"
+                & $log "Warning: $($runtime.Message)."
+                return $runtime
+            }
+
+            $sku = if ([string]::IsNullOrWhiteSpace([string]$runtime.Sku)) { "unknown hardware" } else { [string]$runtime.Sku }
+            $hardwareLabel = if ($sku -match '^jetkvm-v([0-9]+)(?:-|$)') {
+                "JetKVM v$($Matches[1]) [$sku]"
+            } else {
+                $sku
+            }
+            $appVersion = if ([string]::IsNullOrWhiteSpace([string]$runtime.AppVersion)) { "unknown" } else { [string]$runtime.AppVersion }
+            $systemVersion = if ([string]::IsNullOrWhiteSpace([string]$runtime.SystemVersion)) { "unknown" } else { [string]$runtime.SystemVersion }
+            $summary = "$hardwareLabel | App $appVersion | System $systemVersion"
+            & $setIndicator $deviceVersionStatus "OK" $summary
+            & $log "[OK] JetKVM hardware/version: $summary"
+            if (-not (& $setResolvedTailscaleIp ([string]$runtime.TailscaleIp))) {
+                $tailscaleIpBox.Text = ""
+                $openRemoteUiButton.Enabled = $false
+                & $setIndicator $tailscaleIpStatus "Pending" "Tailscale IP: not assigned"
+            }
+            return $runtime
+        } catch {
+            & $setIndicator $deviceVersionStatus "Warn" "JetKVM model/version unavailable"
+            & $log "Warning: JetKVM hardware/version could not be read: $($_.Exception.Message)"
+            return $null
+        }
     }
 
     $refreshBiosReport = {
@@ -6577,7 +7606,7 @@ Inventory tab
                 & $setBusy $false "BIOS scan complete"
             } else {
                 & $setBusy $false "BIOS unsupported"
-                [Windows.Forms.MessageBox]::Show(
+                [JetFuel.ThemedMessageBox]::Show(
                     "This local PC manufacturer is not currently supported for BIOS prep.`r`n`r`nDetected: $($scan.VendorInfo.Manufacturer) $($scan.VendorInfo.Model)`r`n`r`nSupported vendors: Dell, HP, Lenovo.",
                     "BIOS unsupported",
                     "OK",
@@ -6589,7 +7618,7 @@ Inventory tab
             & $refreshBiosReport $null
             & $log ("ERROR: " + $_.Exception.Message)
             & $setBusy $false "Failed"
-            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null
+            [JetFuel.ThemedMessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null
         }
     })
 
@@ -6600,7 +7629,7 @@ Inventory tab
             & $refreshBiosReport $biosState.Scan
             $targets = $biosState.Scan.Targets
             if (-not $targets -or $targets.ApplyRows.Count -eq 0) {
-                [Windows.Forms.MessageBox]::Show("No BIOS changes are needed or available for the selected options.", "BIOS prep", "OK", "Information") | Out-Null
+                [JetFuel.ThemedMessageBox]::Show("No BIOS changes are needed or available for the selected options.", "BIOS prep", "OK", "Information") | Out-Null
                 return
             }
 
@@ -6617,7 +7646,7 @@ Inventory tab
             $summary += "PXE/network boot order will not be changed."
             $summary += "BIOS passwords are used only for this run and are not saved."
 
-            $answer = [Windows.Forms.MessageBox]::Show(
+            $answer = [JetFuel.ThemedMessageBox]::Show(
                 "Apply BIOS prep to this local Windows PC?`r`n`r`n$($summary -join "`r`n")`r`n`r`nThis writes firmware settings. Continue only if you are allowed to manage this machine.",
                 "Apply BIOS prep",
                 "YesNo",
@@ -6635,10 +7664,10 @@ Inventory tab
             $biosSmPasswordBox.Text = ""
             if ($result.Changed) {
                 & $log $result.Message
-                [Windows.Forms.MessageBox]::Show($result.Message, "BIOS prep complete", "OK", "Information") | Out-Null
+                [JetFuel.ThemedMessageBox]::Show($result.Message, "BIOS prep complete", "OK", "Information") | Out-Null
             } else {
                 & $log $result.Message
-                [Windows.Forms.MessageBox]::Show($result.Message, "BIOS prep", "OK", "Information") | Out-Null
+                [JetFuel.ThemedMessageBox]::Show($result.Message, "BIOS prep", "OK", "Information") | Out-Null
             }
 
             $biosState.Scan = Invoke-BiosSettingsScan -EnableWakeOnLan $biosWolCheck.Checked -PowerOnAfterAc $biosAcPowerCheck.Checked -DisablePowerBlockers $biosPowerBlockersCheck.Checked -Log $log
@@ -6649,7 +7678,7 @@ Inventory tab
             $biosSmPasswordBox.Text = ""
             & $log ("ERROR: " + $_.Exception.Message)
             & $setBusy $false "Failed"
-            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null
+            [JetFuel.ThemedMessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null
         }
     })
 
@@ -6666,15 +7695,290 @@ Inventory tab
             [Windows.Forms.Clipboard]::SetText($logBox.Text)
             & $log "Logs copied to clipboard."
         } catch {
-            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null
+            [JetFuel.ThemedMessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null
         }
     })
-    $exitButton.Add_Click({
-        $choice = [Windows.Forms.MessageBox]::Show(
-            "Exit JetFUEL?`r`n`r`nYes = remove JetFUEL's private embedded Web UI support and browser cache, clean up JetFUEL temp/downloaded files, optionally uninstall Git Bash, then exit.`r`nNo = exit only and leave installed tools in place.`r`nCancel = stay here.`r`n`r`nThe shared Microsoft Edge WebView2 Runtime and SSH key files are always left in place.",
-            "Exit JetFUEL",
-            "YesNoCancel",
+
+    $selectOptionValue = {
+        param([Windows.Forms.ComboBox]$Box, $Value)
+        if ($null -eq $Value) { return }
+        foreach ($item in $Box.Items) {
+            if ([string]$item.Value -eq [string]$Value) {
+                $Box.SelectedItem = $item
+                return
+            }
+        }
+    }
+    $getSessionProfile = {
+        [pscustomobject][ordered]@{
+            Deployment = [pscustomobject][ordered]@{
+                JetKvmAddress       = $ipBox.Text.Trim()
+                SshPrivateKeyPath   = $keyBox.Text.Trim()
+                CreateKeyIfMissing  = $createKeyCheck.Checked
+                NoKeyPassphrase     = $noPassCheck.Checked
+                TailscaleName       = $hostBox.Text.Trim()
+                TailscaleIp         = $tailscaleIpBox.Text.Trim()
+                TailscaleVersion    = $versionBox.Text.Trim()
+                InstallerSource     = [string]$installerSourceBox.SelectedItem
+                CleanInstall        = $cleanCheck.Checked
+                UseAuthKey          = $useAuthKeyCheck.Checked
+            }
+            WebUi = [pscustomobject][ordered]@{
+                SavePassword      = $saveWebPasswordCheck.Checked
+                ProtectedPassword = if ($saveWebPasswordCheck.Checked -and -not [string]::IsNullOrEmpty($webPasswordBox.Text)) {
+                    Protect-JetFuelProfileSecret -Value $webPasswordBox.Text
+                } else {
+                    $null
+                }
+            }
+            Installer = [pscustomobject][ordered]@{
+                CustomUrl = $customInstallerUrlBox.Text.Trim()
+                LocalFile = $localInstallerPathBox.Text.Trim()
+            }
+            DeviceSettings = [pscustomobject][ordered]@{
+                DisableAutoUpdate  = $disableAutoUpdateCheck.Checked
+                KeyboardLayout     = Get-SelectedOptionValue $keyboardLayoutBox
+                DisplayBrightness  = Get-SelectedOptionValue $displayBrightnessBox
+                DimDisplayAfter    = Get-SelectedOptionValue $dimDisplayBox
+                TurnOffDisplayAfter = Get-SelectedOptionValue $offDisplayBox
+                HdmiSleepMode      = Get-SelectedOptionValue $hdmiSleepBox
+                SetNetworkHostname = $setNetworkHostnameCheck.Checked
+                NetworkHostname    = $networkHostnameBox.Text.Trim()
+                DomainMode         = Get-SelectedOptionValue $domainBox
+                CustomDomain       = $customDomainBox.Text.Trim()
+                MdnsMode           = Get-SelectedOptionValue $mdnsBox
+                Ipv6Mode           = Get-SelectedOptionValue $ipv6Box
+            }
+            Identity = [pscustomobject][ordered]@{
+                MacProfile = [string]$macProfileBox.SelectedItem
+            }
+            WakeOnLan = [pscustomobject][ordered]@{
+                Name               = $wolNameBox.Text.Trim()
+                MacAddress         = $wolMacBox.Text.Trim()
+                BroadcastAddress   = $wolBroadcastBox.Text.Trim()
+                EnableLocalAdapter = $enableLocalWolCheck.Checked
+            }
+            Bios = [pscustomobject][ordered]@{
+                EnableWakeOnLan      = $biosWolCheck.Checked
+                PowerOnAfterAc       = $biosAcPowerCheck.Checked
+                DisablePowerBlockers = $biosPowerBlockersCheck.Checked
+            }
+        }
+    }
+    $refreshSavedProfiles = {
+        param([string]$SelectPath)
+        $profileBox.BeginUpdate()
+        try {
+            $profileBox.Items.Clear()
+            foreach ($savedProfile in @(Get-JetFuelSavedProfiles)) {
+                [void]$profileBox.Items.Add($savedProfile)
+            }
+            if ($profileBox.Items.Count -gt 0) {
+                $selectedIndex = 0
+                if (-not [string]::IsNullOrWhiteSpace($SelectPath)) {
+                    for ($i = 0; $i -lt $profileBox.Items.Count; $i++) {
+                        if ([string]$profileBox.Items[$i].Path -eq $SelectPath) { $selectedIndex = $i; break }
+                    }
+                }
+                $profileBox.SelectedIndex = $selectedIndex
+            }
+        } finally {
+            $profileBox.EndUpdate()
+        }
+        $hasProfiles = $profileBox.Items.Count -gt 0
+        $loadProfileButton.Enabled = $hasProfiles
+        $deleteProfileButton.Enabled = $hasProfiles
+    }
+    $saveCurrentProfile = {
+        param([bool]$OfferDesktopShortcut)
+
+        $suggestedName = if (-not [string]::IsNullOrWhiteSpace($hostBox.Text)) {
+            $hostBox.Text.Trim()
+        } elseif (-not [string]::IsNullOrWhiteSpace($ipBox.Text)) {
+            $ipBox.Text.Trim()
+        } else {
+            "JetKVM deployment"
+        }
+        $profileName = Show-JetFuelProfileNameDialog -Owner $form -SuggestedName $suggestedName
+        if ([string]::IsNullOrWhiteSpace($profileName)) { return $null }
+
+        try {
+            $profilePath = Join-Path (Get-JetFuelProfilesRoot) (ConvertTo-JetFuelProfileFileName -Name $profileName)
+            if (Test-Path -LiteralPath $profilePath) {
+                $overwrite = [JetFuel.ThemedMessageBox]::ShowActions(
+                    "A saved deployment session named '$profileName' already exists.`r`n`r`nReplace it with the values currently shown in JetFUEL?",
+                    "Replace saved session?",
+                    "Warning",
+                    "Replace session",
+                    "Do not replace",
+                    "Cancel"
+                )
+                if ($overwrite -ne [Windows.Forms.DialogResult]::Yes) { return $null }
+            }
+
+            $savedPath = Save-JetFuelSessionProfile -Name $profileName -Profile (& $getSessionProfile)
+            & $refreshSavedProfiles $savedPath
+            & $log "[OK] Saved deployment profile '$profileName' to $savedPath"
+
+            if ($OfferDesktopShortcut) {
+                $shortcutChoice = [JetFuel.ThemedMessageBox]::ShowActions(
+                    "The deployment session is saved.`r`n`r`nWould you also like a JetFUEL shortcut on this user's Desktop? The shortcut uses the JetFUEL icon and downloads the latest main version when launched.",
+                    "Create JetFUEL shortcut?",
+                    "Question",
+                    "Create shortcut",
+                    "Skip shortcut",
+                    "Keep JetFUEL open"
+                )
+                if ($shortcutChoice -eq [Windows.Forms.DialogResult]::Cancel) { return $null }
+                if ($shortcutChoice -eq [Windows.Forms.DialogResult]::Yes) {
+                    $shortcutPath = New-JetFuelDesktopShortcut
+                    & $log "[OK] Created JetFUEL Desktop shortcut: $shortcutPath"
+                }
+            }
+
+            return $savedPath
+        } catch {
+            & $log ("ERROR: Could not save the session: " + $_.Exception.Message)
+            [JetFuel.ThemedMessageBox]::Show($_.Exception.Message, "Save deployment session", "OK", "Error") | Out-Null
+            return $null
+        }
+    }
+    $loadSelectedProfile = {
+        if (-not $profileBox.SelectedItem) { return }
+        try {
+            $profile = Read-JetFuelSessionProfile -Path ([string]$profileBox.SelectedItem.Path)
+            $deployment = $profile.Deployment
+            $ipBox.Text = [string]$deployment.JetKvmAddress
+            $keyBox.Text = [string]$deployment.SshPrivateKeyPath
+            $createKeyCheck.Checked = [bool]$deployment.CreateKeyIfMissing
+            $noPassCheck.Checked = [bool]$deployment.NoKeyPassphrase
+            $passBox.Text = ""
+            $hostBox.Text = [string]$deployment.TailscaleName
+            $tailscaleIpBox.Text = [string]$deployment.TailscaleIp
+            $openRemoteUiButton.Enabled = -not [string]::IsNullOrWhiteSpace($tailscaleIpBox.Text)
+            $versionBox.Text = [string]$deployment.TailscaleVersion
+            if ($installerSourceBox.Items.Contains([string]$deployment.InstallerSource)) {
+                $installerSourceBox.SelectedItem = [string]$deployment.InstallerSource
+            } else {
+                $installerSourceBox.SelectedItem = "Official JetKVM"
+            }
+            $cleanCheck.Checked = [bool]$deployment.CleanInstall
+            $useAuthKeyCheck.Checked = [bool]$deployment.UseAuthKey
+            $authBox.Text = ""
+
+            $webPasswordBox.Text = ""
+            $saveWebPasswordCheck.Checked = $false
+            if ($profile.PSObject.Properties["WebUi"] -and $profile.WebUi) {
+                $saveWebPasswordCheck.Checked = [bool]$profile.WebUi.SavePassword
+                if ($saveWebPasswordCheck.Checked -and -not [string]::IsNullOrWhiteSpace([string]$profile.WebUi.ProtectedPassword)) {
+                    try {
+                        $webPasswordBox.Text = Unprotect-JetFuelProfileSecret -Value ([string]$profile.WebUi.ProtectedPassword)
+                    } catch {
+                        $saveWebPasswordCheck.Checked = $false
+                        & $log "Warning: This profile's Web UI password could not be decrypted for the current Windows user. Enter it again if needed."
+                    }
+                }
+            }
+
+            $customInstallerUrlBox.Text = [string]$profile.Installer.CustomUrl
+            $localInstallerPathBox.Text = [string]$profile.Installer.LocalFile
+            $device = $profile.DeviceSettings
+            $disableAutoUpdateCheck.Checked = [bool]$device.DisableAutoUpdate
+            & $selectOptionValue $keyboardLayoutBox $device.KeyboardLayout
+            & $selectOptionValue $displayBrightnessBox $device.DisplayBrightness
+            & $selectOptionValue $dimDisplayBox $device.DimDisplayAfter
+            & $selectOptionValue $offDisplayBox $device.TurnOffDisplayAfter
+            & $selectOptionValue $hdmiSleepBox $device.HdmiSleepMode
+            $setNetworkHostnameCheck.Checked = [bool]$device.SetNetworkHostname
+            $networkHostnameBox.Text = [string]$device.NetworkHostname
+            & $selectOptionValue $domainBox $device.DomainMode
+            $customDomainBox.Text = [string]$device.CustomDomain
+            & $selectOptionValue $mdnsBox $device.MdnsMode
+            & $selectOptionValue $ipv6Box $device.Ipv6Mode
+
+            $macProfile = [string]$profile.Identity.MacProfile
+            if (-not [string]::IsNullOrWhiteSpace($macProfile) -and $macProfileBox.Items.Contains($macProfile)) {
+                $macProfileBox.SelectedItem = $macProfile
+            }
+            $wolNameBox.Text = [string]$profile.WakeOnLan.Name
+            $wolMacBox.Text = [string]$profile.WakeOnLan.MacAddress
+            $wolBroadcastBox.Text = [string]$profile.WakeOnLan.BroadcastAddress
+            $enableLocalWolCheck.Checked = [bool]$profile.WakeOnLan.EnableLocalAdapter
+            $biosWolCheck.Checked = [bool]$profile.Bios.EnableWakeOnLan
+            $biosAcPowerCheck.Checked = [bool]$profile.Bios.PowerOnAfterAc
+            $biosPowerBlockersCheck.Checked = [bool]$profile.Bios.DisablePowerBlockers
+            $biosPasswordBox.Text = ""
+            $biosSmPasswordBox.Text = ""
+
+            & $setIndicator $bashStatus "Pending" "Git Bash: not checked"
+            & $setIndicator $sshStatus "Pending" "SSH tools: not checked"
+            & $setIndicator $wingetStatus "Pending" "winget: not checked"
+            & $setIndicator $sshLoginStatus "Pending" "SSH login: enable Developer Mode first"
+            & $setIndicator $kvmStatus "Pending" "JetKVM network: not checked"
+            & $setIndicator $httpStatus "Pending" "JetKVM web UI: not checked"
+            & $setIndicator $deviceVersionStatus "Pending" "JetKVM model/version: not checked"
+            if ([string]::IsNullOrWhiteSpace($tailscaleIpBox.Text)) {
+                & $setIndicator $tailscaleIpStatus "Pending" "Tailscale IP: not checked"
+            } else {
+                & $setIndicator $tailscaleIpStatus "OK" "Tailscale IP: $($tailscaleIpBox.Text)"
+            }
+            $statusLabel.Text = "Profile loaded: $($profile.Name)"
+            & $showPage "Setup"
+            & $log "[OK] Loaded deployment profile '$($profile.Name)'. Re-enter auth keys and SSH/BIOS passphrases, then run preflight."
+        } catch {
+            & $log ("ERROR: Could not load profile: " + $_.Exception.Message)
+            [JetFuel.ThemedMessageBox]::Show($_.Exception.Message, "Load profile", "OK", "Error") | Out-Null
+        }
+    }
+    $loadProfileButton.Add_Click({ & $loadSelectedProfile })
+    $saveProfileButton.Add_Click({ [void](& $saveCurrentProfile $false) })
+    $deleteProfileButton.Add_Click({
+        if (-not $profileBox.SelectedItem) { return }
+        $selected = $profileBox.SelectedItem
+        $answer = [JetFuel.ThemedMessageBox]::Show(
+            "Delete the saved profile '$($selected.Name)'?",
+            "Delete profile",
+            "YesNo",
             "Warning"
+        )
+        if ($answer -ne [Windows.Forms.DialogResult]::Yes) { return }
+        try {
+            [IO.File]::Delete([string]$selected.Path)
+            & $refreshSavedProfiles
+            & $log "Deleted saved deployment profile '$($selected.Name)'."
+        } catch {
+            [JetFuel.ThemedMessageBox]::Show($_.Exception.Message, "Delete profile", "OK", "Error") | Out-Null
+        }
+    })
+    & $refreshSavedProfiles
+
+    $exitState = [pscustomobject]@{ Approved = $false }
+    $exitButton.Add_Click({
+        $saveChoice = [JetFuel.ThemedMessageBox]::ShowActions(
+            "What would you like to do with this deployment session?`r`n`r`nSave and exit stores the reusable device settings under %APPDATA%\JetFUEL\Profiles, offers a Desktop shortcut, and closes without cleanup.`r`n`r`nContinue to exit choices lets you either clean up JetFUEL support files or close while leaving tools installed.`r`n`r`nAuth keys, SSH/BIOS passphrases, logs, generated identities, and SSH key contents are never saved. A Web UI password is saved only when Save securely is selected, using Windows DPAPI for this user.",
+            "Save deployment session?",
+            "Question",
+            "Save and exit",
+            "Continue to exit choices",
+            "Keep JetFUEL open"
+        )
+        if ($saveChoice -eq [Windows.Forms.DialogResult]::Cancel) { return }
+
+        if ($saveChoice -eq [Windows.Forms.DialogResult]::Yes) {
+            $savedPath = & $saveCurrentProfile $true
+            if ([string]::IsNullOrWhiteSpace([string]$savedPath)) { return }
+            $exitState.Approved = $true
+            $form.Close()
+            return
+        }
+
+        $choice = [JetFuel.ThemedMessageBox]::ShowActions(
+            "Choose how JetFUEL should close.`r`n`r`nClean up and exit removes JetFUEL's private embedded Web UI support, browser cache, temporary/downloaded files, and then optionally offers to uninstall Git Bash.`r`n`r`nExit only closes JetFUEL and leaves installed tools and support files in place.`r`n`r`nSaved profiles, the Desktop launcher, shared Microsoft Edge WebView2 Runtime, and SSH key files are always retained.",
+            "Exit JetFUEL",
+            "Warning",
+            "Clean up and exit",
+            "Exit only",
+            "Keep JetFUEL open"
         )
         if ($choice -eq [Windows.Forms.DialogResult]::Cancel) { return }
 
@@ -6688,7 +7992,7 @@ Inventory tab
                 $message = Get-CleanExceptionMessage -ErrorRecord $_
                 & $log "ERROR: Cleanup failed: $message"
                 & $setBusy $false "Cleanup failed"
-                $exitAnyway = [Windows.Forms.MessageBox]::Show(
+                $exitAnyway = [JetFuel.ThemedMessageBox]::Show(
                     "Cleanup hit a problem:`r`n`r`n$message`r`n`r`nExit JetFUEL anyway?",
                     "Cleanup failed",
                     "YesNo",
@@ -6698,9 +8002,16 @@ Inventory tab
             }
         }
 
+        $exitState.Approved = $true
         $form.Close()
     })
     $form.Add_FormClosing({
+        param($sender, $eventArgs)
+        if (-not $exitState.Approved -and $eventArgs.CloseReason -eq [Windows.Forms.CloseReason]::UserClosing) {
+            $eventArgs.Cancel = $true
+            $exitButton.PerformClick()
+            return
+        }
         if ($webUiState.Control) {
             try { $webUiState.Control.Dispose() } catch {}
             $webUiState.Control = $null
@@ -6805,7 +8116,7 @@ Inventory tab
             )
             if ($setNetworkHostnameCheck.Checked) { $summary += "Network hostname: $networkHostname" }
 
-            $answer = [Windows.Forms.MessageBox]::Show(
+            $answer = [JetFuel.ThemedMessageBox]::Show(
                 "Apply these JetKVM device settings?`r`n`r`n$($summary -join "`r`n")`r`n`r`nJetFUEL will back up /userdata/kvm_config.json, write the settings, then offer to reboot.",
                 "Apply JetKVM settings",
                 "YesNo",
@@ -6838,12 +8149,12 @@ Inventory tab
         } catch {
             & $log ("ERROR: " + $_.Exception.Message)
             & $setBusy $false "Failed"
-            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null
+            [JetFuel.ThemedMessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null
         }
     })
     $openAction = {
         try { Open-JetKvmUi -JetKvmAddress $ipBox.Text.Trim() }
-        catch { [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null }
+        catch { [JetFuel.ThemedMessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null }
     }
     $openUiButton.Add_Click($openAction)
     $openUiButton2.Add_Click($openAction)
@@ -6917,7 +8228,7 @@ Inventory tab
         } catch {
             & $log ("ERROR: " + $_.Exception.Message)
             & $setBusy $false "Inventory failed"
-            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetKVM inventory", "OK", "Error") | Out-Null
+            [JetFuel.ThemedMessageBox]::Show($_.Exception.Message, "JetKVM inventory", "OK", "Error") | Out-Null
         }
     })
 
@@ -6959,7 +8270,7 @@ Inventory tab
             & $log "[OK] Inventory report saved: $reportPath"
         } catch {
             & $log ("ERROR: " + $_.Exception.Message)
-            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "Deployment inventory", "OK", "Error") | Out-Null
+            [JetFuel.ThemedMessageBox]::Show($_.Exception.Message, "Deployment inventory", "OK", "Error") | Out-Null
         }
     })
 
@@ -6972,7 +8283,7 @@ Inventory tab
             & $log "[OK] JetKVM inventory details copied to the clipboard."
         } catch {
             & $log ("ERROR: " + $_.Exception.Message)
-            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetKVM inventory", "OK", "Error") | Out-Null
+            [JetFuel.ThemedMessageBox]::Show($_.Exception.Message, "JetKVM inventory", "OK", "Error") | Out-Null
         }
     })
 
@@ -6986,7 +8297,7 @@ Inventory tab
             & $log "Opened inventory report: $reportPath"
         } catch {
             & $log ("ERROR: " + $_.Exception.Message)
-            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetKVM inventory", "OK", "Error") | Out-Null
+            [JetFuel.ThemedMessageBox]::Show($_.Exception.Message, "JetKVM inventory", "OK", "Error") | Out-Null
         }
     })
 
@@ -6997,7 +8308,7 @@ Inventory tab
             & $log $Description
         } catch {
             & $log ("ERROR: Could not open $Url - " + $_.Exception.Message)
-            [Windows.Forms.MessageBox]::Show("Could not open:`r`n$Url`r`n`r`n$($_.Exception.Message)", "JetFUEL diagnostics", "OK", "Error") | Out-Null
+            [JetFuel.ThemedMessageBox]::Show("Could not open:`r`n$Url`r`n`r`n$($_.Exception.Message)", "JetFUEL diagnostics", "OK", "Error") | Out-Null
         }
     }
 
@@ -7015,7 +8326,7 @@ Inventory tab
         } catch {
             & $log ("ERROR: " + $_.Exception.Message)
             & $setBusy $false "Failed"
-            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL diagnostics", "OK", "Error") | Out-Null
+            [JetFuel.ThemedMessageBox]::Show($_.Exception.Message, "JetFUEL diagnostics", "OK", "Error") | Out-Null
         }
     })
 
@@ -7054,11 +8365,11 @@ Inventory tab
             if ($result.TimedOut) { throw "The full report timed out after 150 seconds. Partial output was saved to $reportPath" }
             if ($result.ExitCode -ne 0) { throw "The full report command exited with code $($result.ExitCode). Partial output was saved to $reportPath" }
             & $setBusy $false "Report saved"
-            [Windows.Forms.MessageBox]::Show("Diagnostic report saved to:`r`n`r`n$reportPath`r`n`r`nReview it for identifying information before sharing.", "JetFUEL diagnostics", "OK", "Information") | Out-Null
+            [JetFuel.ThemedMessageBox]::Show("Diagnostic report saved to:`r`n`r`n$reportPath`r`n`r`nReview it for identifying information before sharing.", "JetFUEL diagnostics", "OK", "Information") | Out-Null
         } catch {
             & $log ("ERROR: " + $_.Exception.Message)
             & $setBusy $false "Failed"
-            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL diagnostics", "OK", "Error") | Out-Null
+            [JetFuel.ThemedMessageBox]::Show($_.Exception.Message, "JetFUEL diagnostics", "OK", "Error") | Out-Null
         } finally {
             if ($dialog) { $dialog.Dispose() }
         }
@@ -7077,7 +8388,7 @@ Inventory tab
         } catch {
             & $log ("ERROR: " + $_.Exception.Message)
             & $setBusy $false "Failed"
-            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL diagnostics", "OK", "Error") | Out-Null
+            [JetFuel.ThemedMessageBox]::Show($_.Exception.Message, "JetFUEL diagnostics", "OK", "Error") | Out-Null
         }
     })
 
@@ -7094,14 +8405,14 @@ Inventory tab
         } catch {
             & $log ("ERROR: " + $_.Exception.Message)
             & $setBusy $false "Failed"
-            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL diagnostics", "OK", "Error") | Out-Null
+            [JetFuel.ThemedMessageBox]::Show($_.Exception.Message, "JetFUEL diagnostics", "OK", "Error") | Out-Null
         }
     })
 
     $rebootJetKvmButton.Add_Click({
         try {
             $target = & $getJetKvmSshTarget
-            $answer = [Windows.Forms.MessageBox]::Show("Request a normal JetKVM reboot now?", "Reboot JetKVM", "YesNo", "Question")
+            $answer = [JetFuel.ThemedMessageBox]::Show("Request a normal JetKVM reboot now?", "Reboot JetKVM", "YesNo", "Question")
             if ($answer -ne [Windows.Forms.DialogResult]::Yes) { return }
             & $setBusy $true "Requesting reboot..."
             $result = Invoke-JetKvmSshCommand -JetKvmAddress $target.Ip -KeyPath $target.KeyPath -Command "sync; echo '[OK] normal reboot requested'; ( sleep 1; reboot ) >/dev/null 2>&1 &" -TimeoutSeconds 8
@@ -7114,14 +8425,14 @@ Inventory tab
         } catch {
             & $log ("ERROR: " + $_.Exception.Message)
             & $setBusy $false "Failed"
-            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL diagnostics", "OK", "Error") | Out-Null
+            [JetFuel.ThemedMessageBox]::Show($_.Exception.Message, "JetFUEL diagnostics", "OK", "Error") | Out-Null
         }
     })
 
     $forceRebootJetKvmButton.Add_Click({
         try {
             $target = & $getJetKvmSshTarget
-            $answer = [Windows.Forms.MessageBox]::Show("Force reboot skips the normal orderly shutdown path and can risk filesystem damage.`r`n`r`nUse it only when a normal reboot does not work. It is NOT an electrical power cycle.`r`n`r`nContinue?", "Force reboot JetKVM", "YesNo", "Warning")
+            $answer = [JetFuel.ThemedMessageBox]::Show("Force reboot skips the normal orderly shutdown path and can risk filesystem damage.`r`n`r`nUse it only when a normal reboot does not work. It is NOT an electrical power cycle.`r`n`r`nContinue?", "Force reboot JetKVM", "YesNo", "Warning")
             if ($answer -ne [Windows.Forms.DialogResult]::Yes) { return }
             & $setBusy $true "Requesting force reboot..."
             $result = Invoke-JetKvmSshCommand -JetKvmAddress $target.Ip -KeyPath $target.KeyPath -Command "sync; echo '[WARN] force reboot requested'; ( sleep 1; reboot -f ) >/dev/null 2>&1 &" -TimeoutSeconds 8
@@ -7134,12 +8445,12 @@ Inventory tab
         } catch {
             & $log ("ERROR: " + $_.Exception.Message)
             & $setBusy $false "Failed"
-            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL diagnostics", "OK", "Error") | Out-Null
+            [JetFuel.ThemedMessageBox]::Show($_.Exception.Message, "JetFUEL diagnostics", "OK", "Error") | Out-Null
         }
     })
 
     $powerCycleHelpButton.Add_Click({
-        [Windows.Forms.MessageBox]::Show(
+        [JetFuel.ThemedMessageBox]::Show(
             "JetKVM cannot electrically power-cycle itself: after its input power is removed, its software cannot turn that power back on.`r`n`r`nFor a full power cycle, remove and restore USB power physically or use an independently controlled USB/PoE switch or smart plug.`r`n`r`nReboot and Force reboot only restart Linux; they do not remove electrical power.",
             "Full JetKVM power cycle",
             "OK",
@@ -7151,17 +8462,17 @@ Inventory tab
         try {
             Open-JetKvmUi -JetKvmAddress $ipBox.Text.Trim()
             & $log "Opened JetKVM UI. Use Settings > General > Check for Updates for the normal OTA update path."
-            [Windows.Forms.MessageBox]::Show("In the JetKVM UI, open Settings > General and choose Check for Updates. This is the recommended way to update both supported components through the normal rollout.", "JetKVM OTA update", "OK", "Information") | Out-Null
+            [JetFuel.ThemedMessageBox]::Show("In the JetKVM UI, open Settings > General and choose Check for Updates. This is the recommended way to update both supported components through the normal rollout.", "JetKVM OTA update", "OK", "Information") | Out-Null
         } catch {
             & $log ("ERROR: " + $_.Exception.Message)
-            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL diagnostics", "OK", "Error") | Out-Null
+            [JetFuel.ThemedMessageBox]::Show($_.Exception.Message, "JetFUEL diagnostics", "OK", "Error") | Out-Null
         }
     })
 
     $manualAppUpdateButton.Add_Click({
         try {
             $target = & $getJetKvmSshTarget
-            $answer = [Windows.Forms.MessageBox]::Show(
+            $answer = [JetFuel.ThemedMessageBox]::Show(
                 "Use JetKVM's official OTA UI whenever possible.`r`n`r`nThis advanced fallback queries JetKVM's official release API for this hardware SKU, verifies the app SHA-256, stages only the app component, and reboots. It bypasses staged rollout and does not update the system image.`r`n`r`nContinue?",
                 "Manual JetKVM app update",
                 "YesNo",
@@ -7182,7 +8493,7 @@ Inventory tab
         } catch {
             & $log ("ERROR: " + $_.Exception.Message)
             & $setBusy $false "Failed"
-            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL diagnostics", "OK", "Error") | Out-Null
+            [JetFuel.ThemedMessageBox]::Show($_.Exception.Message, "JetFUEL diagnostics", "OK", "Error") | Out-Null
         }
     })
 
@@ -7193,7 +8504,7 @@ Inventory tab
         & $openDiagnosticUrl "https://github.com/jetkvm/rv1106-system/releases/download/v0.2.5/SocToolKit_v2.5_20250701_01_win.zip" "Opened official JetKVM/Rockchip SocToolKit v2.5 download for manual DFU recovery."
     })
     $recoveryImageButton.Add_Click({
-        $answer = [Windows.Forms.MessageBox]::Show("Open the latest official jetkvm-v2 system recovery image?`r`n`r`nDFU flashing can erase/reset the JetKVM. Confirm the hardware SKU and follow the official recovery guide before using this image.", "JetKVM recovery image", "YesNo", "Warning")
+        $answer = [JetFuel.ThemedMessageBox]::Show("Open the latest official jetkvm-v2 system recovery image?`r`n`r`nDFU flashing can erase/reset the JetKVM. Confirm the hardware SKU and follow the official recovery guide before using this image.", "JetKVM recovery image", "YesNo", "Warning")
         if ($answer -eq [Windows.Forms.DialogResult]::Yes) {
             & $openDiagnosticUrl "https://api.jetkvm.com/releases/system_recovery/latest?sku=jetkvm-v2" "Opened official latest jetkvm-v2 recovery image endpoint."
         }
@@ -7213,7 +8524,7 @@ Inventory tab
             & $log "Public key copied to clipboard. Paste it into JetKVM Settings > Advanced > Developer Mode."
         } catch {
             & $log ("ERROR: " + $_.Exception.Message)
-            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null
+            [JetFuel.ThemedMessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null
         }
     })
 
@@ -7270,7 +8581,7 @@ echo '--- mac identity complete ---'
             & $log "Generated $($profile.Name) MAC: $($macBox.Text)"
         } catch {
             & $log ("ERROR: " + $_.Exception.Message)
-            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null
+            [JetFuel.ThemedMessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null
         }
     })
 
@@ -7286,7 +8597,7 @@ echo '--- mac identity complete ---'
         } catch {
             & $log ("ERROR: " + $_.Exception.Message)
             & $setBusy $false "Failed"
-            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null
+            [JetFuel.ThemedMessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null
         }
     })
 
@@ -7296,7 +8607,7 @@ echo '--- mac identity complete ---'
             $macBox.Text = $mac
             Assert-MacAddress -MacAddress $mac
             if (-not (Test-MacAddressIsLocalAdministered -MacAddress $mac)) {
-                $answerGlobal = [Windows.Forms.MessageBox]::Show(
+                $answerGlobal = [JetFuel.ThemedMessageBox]::Show(
                     "This MAC is not locally administered. That means it may belong to a real vendor range.`r`n`r`nUse a generated local-administered MAC unless you have a specific reason to override it.`r`n`r`nContinue anyway?",
                     "Global MAC warning",
                     "YesNo",
@@ -7304,7 +8615,7 @@ echo '--- mac identity complete ---'
                 )
                 if ($answerGlobal -ne [Windows.Forms.DialogResult]::Yes) { return }
             }
-            $answer = [Windows.Forms.MessageBox]::Show(
+            $answer = [JetFuel.ThemedMessageBox]::Show(
                 "Write this MAC override to the JetKVM?`r`n`r`n$mac`r`n`r`nThe JetKVM will need to reboot before Ethernet uses it. Its IP address may change after reboot.",
                 "Apply JetKVM MAC override",
                 "YesNo",
@@ -7326,7 +8637,7 @@ echo '--- mac identity complete ---'
             if ($result.ExitCode -ne 0) { throw "MAC override failed with exit code $($result.ExitCode)." }
             & $log "MAC override saved. Reboot JetKVM for it to become active."
 
-            $reboot = [Windows.Forms.MessageBox]::Show(
+            $reboot = [JetFuel.ThemedMessageBox]::Show(
                 "MAC override saved. Reboot the JetKVM now?`r`n`r`nAfter reboot, the JetKVM may receive a different LAN IP address.",
                 "Reboot JetKVM",
                 "YesNo",
@@ -7345,13 +8656,13 @@ echo '--- mac identity complete ---'
         } catch {
             & $log ("ERROR: " + $_.Exception.Message)
             & $setBusy $false "Failed"
-            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null
+            [JetFuel.ThemedMessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null
         }
     })
 
     $clearMacButton.Add_Click({
         try {
-            $answer = [Windows.Forms.MessageBox]::Show(
+            $answer = [JetFuel.ThemedMessageBox]::Show(
                 "Clear the JetKVM user MAC override?`r`n`r`nThis removes /userdata/jetkvm/mac_address and the legacy /data/ethaddr.txt override if present. It does not remove JetKVM's system-generated stable MAC file.",
                 "Clear JetKVM MAC override",
                 "YesNo",
@@ -7371,7 +8682,7 @@ echo '--- mac identity complete ---'
             if ($result.ExitCode -ne 0) { throw "Clearing MAC override failed with exit code $($result.ExitCode)." }
             $macOverrideLabel.Text = "User override: cleared; reboot required"
             $macOverrideLabel.ForeColor = $ui.Warn
-            $reboot = [Windows.Forms.MessageBox]::Show(
+            $reboot = [JetFuel.ThemedMessageBox]::Show(
                 "MAC override cleared. Reboot the JetKVM now?",
                 "Reboot JetKVM",
                 "YesNo",
@@ -7390,7 +8701,7 @@ echo '--- mac identity complete ---'
         } catch {
             & $log ("ERROR: " + $_.Exception.Message)
             & $setBusy $false "Failed"
-            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null
+            [JetFuel.ThemedMessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null
         }
     })
 
@@ -7470,7 +8781,7 @@ echo '--- mac identity complete ---'
         } catch {
             & $log ("ERROR: " + $_.Exception.Message)
             & $setBusy $false "Failed"
-            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null
+            [JetFuel.ThemedMessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null
         }
     })
 
@@ -7539,14 +8850,14 @@ echo '--- mac identity complete ---'
         } catch {
             & $log ("ERROR: " + $_.Exception.Message)
             & $setBusy $false "Failed"
-            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null
+            [JetFuel.ThemedMessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null
         }
     })
 
     $rebootJetKvmAfterIdentity = {
         param([string]$Ip, [string]$KeyPath, [string]$Reason)
 
-        $reboot = [Windows.Forms.MessageBox]::Show(
+        $reboot = [JetFuel.ThemedMessageBox]::Show(
             "$Reason saved to the JetKVM config.`r`n`r`nReboot the JetKVM now so the KVM service reloads it? If you choose No, reboot later from the JetKVM UI.",
             "Reboot JetKVM",
             "YesNo",
@@ -7587,7 +8898,7 @@ echo '--- mac identity complete ---'
             }
 
             if ($selectedAdapter -and $selectedAdapter.IsWireless) {
-                $wifiAnswer = [Windows.Forms.MessageBox]::Show(
+                $wifiAnswer = [JetFuel.ThemedMessageBox]::Show(
                     "The selected adapter looks like Wi-Fi. Wake-on-LAN over Wi-Fi is often unsupported or unreliable.`r`n`r`nContinue anyway?",
                     "Wireless Wake-on-LAN warning",
                     "YesNo",
@@ -7597,7 +8908,7 @@ echo '--- mac identity complete ---'
             }
 
             $localAction = if ($enableLocalWolCheck.Checked) { "JetFUEL will also try to enable Wake-on-LAN on the selected Windows adapter. This requires Administrator PowerShell and adapter driver support." } else { "JetFUEL will not change this Windows adapter. Make sure Wake-on-LAN is already enabled in Windows and BIOS/UEFI." }
-            $answer = [Windows.Forms.MessageBox]::Show(
+            $answer = [JetFuel.ThemedMessageBox]::Show(
                 "Set up this Wake-on-LAN target?`r`n`r`nName: $deviceName`r`nMAC: $mac`r`nBroadcast IP: $(if ($broadcast) { $broadcast } else { "(blank/default)" })`r`n`r`n$localAction`r`n`r`nJetFUEL will back up /userdata/kvm_config.json and save the target into JetKVM's Wake on LAN device list.",
                 "Set up Wake-on-LAN",
                 "YesNo",
@@ -7615,7 +8926,7 @@ echo '--- mac identity complete ---'
                 } catch {
                     $localMessage = Get-CleanExceptionMessage -ErrorRecord $_
                     & $log "Warning: Local Wake-on-LAN enable failed: $localMessage"
-                    $continue = [Windows.Forms.MessageBox]::Show(
+                    $continue = [JetFuel.ThemedMessageBox]::Show(
                         "JetFUEL could not enable Wake-on-LAN on this Windows adapter:`r`n`r`n$localMessage`r`n`r`nSave the JetKVM Wake-on-LAN target anyway? You may need to enable WOL manually in Windows, adapter driver settings, and BIOS/UEFI.",
                         "Local WOL setup failed",
                         "YesNo",
@@ -7635,7 +8946,7 @@ echo '--- mac identity complete ---'
         } catch {
             & $log ("ERROR: " + $_.Exception.Message)
             & $setBusy $false "Failed"
-            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null
+            [JetFuel.ThemedMessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null
         }
     })
 
@@ -7644,7 +8955,7 @@ echo '--- mac identity complete ---'
             if (-not $displayChoiceBox.SelectedItem) { throw "Select a display EDID first." }
             $item = $displayChoiceBox.SelectedItem
             $edid = Assert-EdidHex -Hex $item.Hex
-            $answer = [Windows.Forms.MessageBox]::Show(
+            $answer = [JetFuel.ThemedMessageBox]::Show(
                 "Apply this display EDID to the JetKVM?`r`n`r`n$($item.DisplayName)`r`n`r`nJetFUEL will back up /userdata/kvm_config.json, write the EDID hex/file content to hdmi_edid_string, then offer to reboot.",
                 "Apply JetKVM EDID",
                 "YesNo",
@@ -7665,7 +8976,7 @@ echo '--- mac identity complete ---'
         } catch {
             & $log ("ERROR: " + $_.Exception.Message)
             & $setBusy $false "Failed"
-            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null
+            [JetFuel.ThemedMessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null
         }
     })
 
@@ -7674,7 +8985,7 @@ echo '--- mac identity complete ---'
             if (-not $usbChoiceBox.SelectedItem) { throw "Select a USB identity first." }
             $item = $usbChoiceBox.SelectedItem
             $usbConfig = ConvertTo-JetKvmUsbConfig -Device $item
-            $answer = [Windows.Forms.MessageBox]::Show(
+            $answer = [JetFuel.ThemedMessageBox]::Show(
                 "Apply this USB identity to the JetKVM?`r`n`r`n$($item.DisplayName)`r`n`r`nThis changes the JetKVM composite USB vendor/product identity only. It does not clone every descriptor from a physical keyboard or mouse.",
                 "Apply JetKVM USB identity",
                 "YesNo",
@@ -7695,7 +9006,7 @@ echo '--- mac identity complete ---'
         } catch {
             & $log ("ERROR: " + $_.Exception.Message)
             & $setBusy $false "Failed"
-            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null
+            [JetFuel.ThemedMessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null
         }
     })
 
@@ -7756,9 +9067,12 @@ echo '--- mac identity complete ---'
             if ($sshLogin.Ok) {
                 & $log "JetKVM SSH login confirmed with the selected key."
                 & $setIndicator $sshLoginStatus "OK" "JetKVM SSH login confirmed"
+                [void](& $refreshRuntimeIdentity $ip $keyPath)
             } else {
                 & $log ("JetKVM SSH login not confirmed: " + $sshLogin.Message)
                 & $setIndicator $sshLoginStatus "Warn" "SSH login not confirmed"
+                & $setIndicator $deviceVersionStatus "Warn" "JetKVM model/version needs SSH"
+                & $setIndicator $tailscaleIpStatus "Warn" "Tailscale IP needs SSH"
             }
 
             if (-not $Install) {
@@ -7775,7 +9089,7 @@ echo '--- mac identity complete ---'
                 Assert-TailscaleAuthKeyLooksUsable -AuthKey $authKey
             }
             if ($useAuthKeyCheck.Checked -and $authKey -notmatch '^tskey-auth-') {
-                $answer = [Windows.Forms.MessageBox]::Show(
+                $answer = [JetFuel.ThemedMessageBox]::Show(
                     "This does not look like a Tailscale pre-authentication key. It should usually start with tskey-auth-. Continue anyway?",
                     "JetFUEL",
                     "YesNo",
@@ -7824,6 +9138,7 @@ echo '--- mac identity complete ---'
                     }
                 }
 
+            [void](& $refreshRuntimeIdentity $ip $keyPath)
             & $log "Setup complete. Confirm the new device in the Tailscale admin console."
             & $setBusy $false "Complete"
         } catch {
@@ -7832,7 +9147,7 @@ echo '--- mac identity complete ---'
             if ($_.Exception.Message -match "winget|App Installer") { & $setIndicator $wingetStatus "Fail" "winget problem" }
             if ($_.Exception.Message -match "bash|Git") { & $setIndicator $bashStatus "Fail" "Git Bash problem" }
             if ($_.Exception.Message -match "SSH|ssh") { & $setIndicator $sshStatus "Fail" "SSH problem" }
-            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null
+            [JetFuel.ThemedMessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null
         }
     }
 
@@ -7879,12 +9194,13 @@ echo '--- check complete ---'
 '@
             $result = Invoke-JetKvmSshCommand -JetKvmAddress $ip -KeyPath $keyPath -Command $cmd -TimeoutSeconds 45
             if ($result.Output) { $result.Output -split "`n" | ForEach-Object { & $log $_ } }
+            [void](& $setResolvedTailscaleIp ([string]$result.Output))
             if ($result.ExitCode -eq 0) { & $setBusy $false "Tailscale check complete" }
             else { & $setBusy $false "Tailscale check completed with warnings" }
         } catch {
             & $log ("ERROR: " + $_.Exception.Message)
             & $setBusy $false "Failed"
-            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null
+            [JetFuel.ThemedMessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null
         }
     })
     $repairTailscaleButton.Add_Click({
@@ -7925,6 +9241,7 @@ echo '--- check complete ---'
                     Start-Process $statusLoginUrl
                     & $setBusy $true "Waiting for browser login..."
                     if (Wait-JetKvmTailscaleOnline -JetKvmAddress $ip -KeyPath $keyPath -Log $log -TimeoutSeconds 180) {
+                        [void](& $refreshRuntimeIdentity $ip $keyPath)
                         & $setBusy $false "Tailscale online"
                     } else {
                         & $setBusy $false "Login wait timed out"
@@ -7957,6 +9274,7 @@ echo '--- check complete ---'
                     Start-Process $loginUrl
                     & $setBusy $true "Waiting for browser login..."
                     if (Wait-JetKvmTailscaleOnline -JetKvmAddress $ip -KeyPath $keyPath -Log $log -TimeoutSeconds 180) {
+                        [void](& $refreshRuntimeIdentity $ip $keyPath)
                         & $setBusy $false "Tailscale online"
                     } else {
                         & $setBusy $false "Login wait timed out"
@@ -7973,6 +9291,7 @@ echo '--- check complete ---'
                 $safeOutput = $safeOutput.Replace($authKey, "<redacted-auth-key>")
             }
             if ($safeOutput) { $safeOutput -split "`n" | ForEach-Object { & $log $_ } }
+            [void](& $setResolvedTailscaleIp ([string]$safeOutput))
             $loginUrlFound = Open-TailscaleLoginUrlFromText -Text $safeOutput -Log $log
             if ($result.TimedOut -and $loginUrlFound) {
                 throw "Tailscale is waiting for browser login. Complete the login page, then click Check Tailscale."
@@ -7983,7 +9302,10 @@ echo '--- check complete ---'
             if ($result.TimedOut) {
                 throw "Tailscale repair timed out after 90 seconds. If no auth key was supplied, run Repair again and use the login URL if one appears in the log."
             }
-            if ($result.ExitCode -eq 0) { & $setBusy $false "Repair complete" }
+            if ($result.ExitCode -eq 0) {
+                [void](& $refreshRuntimeIdentity $ip $keyPath)
+                & $setBusy $false "Repair complete"
+            }
             else {
                 if ($result.Output -match 'invalid key|unable to validate API key|API key .*not valid|API key does not exist') {
                     throw "Tailscale rejected the pasted auth key during repair even after local logout/reset. This usually means the JetKVM cannot validate that key against the Tailscale control server, or the key text being received by tailscale differs from the saved key. Run Check Tailscale and verify the JetKVM date/network/DNS, or untick auth key and run Repair to use the manual login URL."
@@ -7993,12 +9315,12 @@ echo '--- check complete ---'
         } catch {
             & $log ("ERROR: " + $_.Exception.Message)
             & $setBusy $false "Failed"
-            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null
+            [JetFuel.ThemedMessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null
         }
     })
     $removeTailscaleButton.Add_Click({
         try {
-            $answer = [Windows.Forms.MessageBox]::Show(
+            $answer = [JetFuel.ThemedMessageBox]::Show(
                 "This will stop Tailscale on the JetKVM, log it out where possible, remove /userdata/tailscale, and reboot the JetKVM. Continue?",
                 "Remove Tailscale from JetKVM",
                 "YesNo",
@@ -8039,7 +9361,7 @@ echo '--- rebooting JetKVM ---'
         } catch {
             & $log ("ERROR: " + $_.Exception.Message)
             & $setBusy $false "Failed"
-            [Windows.Forms.MessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null
+            [JetFuel.ThemedMessageBox]::Show($_.Exception.Message, "JetFUEL", "OK", "Error") | Out-Null
         }
     })
     # Double-buffer the whole control tree so resizing and moving the window

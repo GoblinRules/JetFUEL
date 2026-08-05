@@ -130,6 +130,18 @@ Useful vendor resources:
 
 After Tailscale is online, you can remove the SSH public key from JetKVM or disable Developer Mode again if you do not need SSH access.
 
+Preflight also reads the JetKVM hardware SKU, app version, and system version over SSH. The Setup status indicators therefore show which JetKVM hardware variant is connected when the device exposes its SKU. If Tailscale is already connected, JetFUEL captures its `100.x` IPv4 address and enables `Open remote UI`.
+
+## Saved Deployment Profiles
+
+The compact profile picker at the top of Setup can save the current values, load a named profile, or delete a profile. Profiles are stored per Windows user under `%APPDATA%\JetFUEL\Profiles` and remain available after JetFUEL cleanup.
+
+Profiles save reusable deployment choices: JetKVM and Tailscale addresses, Tailscale name/version, SSH key path and creation choices, installer source, device settings, MAC profile, Wake-on-LAN target, and BIOS-prep selections. They never save Tailscale auth keys, SSH key passphrases, BIOS passwords, logs, generated identities, or SSH key contents.
+
+The optional JetKVM Web UI password is saved only when `Save securely` is selected. It is encrypted with Windows DPAPI for the current user and normally cannot be decrypted by another Windows account or on another Windows installation.
+
+On exit, JetFUEL offers to name and save the current session. It can then create a Desktop shortcut using the JetFUEL icon. The shortcut launcher is stored under `%APPDATA%\JetFUEL\Launcher`, downloads the latest `main` bootstrap when launched, and uses the local bootstrap copy as a fallback when available.
+
 ## JetFUEL Web UI
 
 The `Web UI` tab loads the JetKVM's official web interface directly inside the JetFUEL window. Video, keyboard/mouse input, settings, and authentication therefore use the same interface served by the selected JetKVM.
@@ -137,10 +149,10 @@ The `Web UI` tab loads the JetKVM's official web interface directly inside the J
 - `Install Web UI` downloads the pinned `Microsoft.Web.WebView2` SDK package from NuGet, verifies its SHA-256, and installs the private WinForms support files under `%LOCALAPPDATA%\JetFUEL\tools\webview2`.
 - If the shared Microsoft Edge WebView2 Runtime is missing, JetFUEL downloads Microsoft's Evergreen installer and verifies its Microsoft Corporation Authenticode signature before running it.
 - Enter a device address or reuse the Setup address, then select `Open`. The toolbar also provides Back, Forward, Refresh, and `Open externally`.
-- JetFUEL connects directly to the specified address. It does not perform recurring `/24` subnet scans or depend on mDNS discovery.
+- `Scan network` performs a one-time manual probe of the active local `/24`, then lists web servers that return JetKVM's `/device/status` response. It runs only when clicked, never scans in the background, and does not depend on mDNS discovery.
 - `Remove support` closes the embedded control and removes JetFUEL's private support files and browser cache. It leaves the shared WebView2 Runtime installed because Windows and other applications may use it.
 
-JetFUEL does not collect or store the JetKVM password used by this interface. Authentication remains inside the embedded JetKVM web session. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the WebView2 SDK notice.
+Authentication remains inside the embedded JetKVM web session. If a Web UI password is entered on Setup, JetFUEL uses it only for a same-origin local-login request and never writes it to the log. It is persisted only when `Save securely` is selected, as current-user Windows DPAPI ciphertext. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the WebView2 SDK notice.
 
 ## JetKVM And Local PC Inventory
 
