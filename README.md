@@ -212,7 +212,8 @@ JetFUEL does not currently set the local JetKVM password. Use JetKVM Settings > 
 
 The `Diagnostics` tab uses the Setup tab JetKVM address and SSH key. Its health actions are read-only:
 
-- `Quick check` collects the JetKVM build/system versions, uptime and load, memory, uninterruptible D-state processes, important services, network, storage, Tailscale state, JetFUEL boot-hook/watchdog state, and recent kernel messages.
+- `Quick check` fills a compact summary box with the JetKVM app/system versions, hardware model/SKU, revision, storage type/capacity/usage, and RAM total/used/allocated/available/cache figures. It also collects detailed uptime and load, uninterruptible D-state processes, important services, network, Tailscale state, JetFUEL boot-hook/watchdog state, and recent kernel messages.
+  RAM `used` excludes reusable cache/buffers; `allocated` is total RAM minus the kernel's `MemAvailable` estimate.
 - `Save full report` adds the process list, `/userdata/jetkvm/last.log`, text crash logs from `/userdata/jetkvm/crashdump`, display/USB state, thermal readings, persistent-file inventory, and the full kernel log.
 - `View app log` and `View crash logs` load the relevant debug text into JetFUEL's colour-coded status log.
 

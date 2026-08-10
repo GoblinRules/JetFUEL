@@ -2484,6 +2484,18 @@ section() {
   printf '\n=== %s ===\n' "$1"
 }
 
+format_kb() {
+  awk -v kb="${1:-0}" 'BEGIN {
+    if (kb >= 1048576) printf "%.1f GB", kb / 1048576;
+    else if (kb >= 1024) printf "%.1f MB", kb / 1024;
+    else printf "%.0f KB", kb;
+  }'
+}
+
+meminfo_kb() {
+  awk -v name="$1:" '$1 == name { print $2; exit }' /proc/meminfo 2>/dev/null
+}
+
 run_with_timeout() {
   seconds="$1"
   shift
@@ -2494,14 +2506,82 @@ run_with_timeout() {
   fi
 }
 
-section "VERSION"
+build_info=""
 if command -v wget >/dev/null 2>&1; then
-  wget -qO- http://127.0.0.1/metrics 2>/dev/null | grep '^jetkvm_build_info' || true
+  build_info="$(wget -qO- http://127.0.0.1/metrics 2>/dev/null | grep '^jetkvm_build_info' | head -n 1 || true)"
 fi
-printf 'System version: '
-cat /version 2>/dev/null || echo unknown
-printf 'Hardware SKU: '
-cat /etc/jetkvm-sku 2>/dev/null || echo jetkvm-v2
+app_version="$(printf '%s\n' "$build_info" | sed -n 's/.*version="\([^"]*\)".*/\1/p')"
+app_revision="$(printf '%s\n' "$build_info" | sed -n 's/.*revision="\([^"]*\)".*/\1/p')"
+system_version="$(cat /version 2>/dev/null | tr -d '\r\n')"
+hardware_sku="$(cat /etc/jetkvm-sku 2>/dev/null | tr -d '\r\n')"
+[ -n "$app_version" ] || app_version=unknown
+[ -n "$app_revision" ] || app_revision=unknown
+[ -n "$system_version" ] || system_version=unknown
+[ -n "$hardware_sku" ] || hardware_sku=jetkvm-v2
+
+storage_source="$(awk '$2 == "/userdata" { print $1; exit }' /proc/mounts 2>/dev/null)"
+[ -n "$storage_source" ] || storage_source=unknown
+storage_resolved="$(readlink -f "$storage_source" 2>/dev/null || printf '%s' "$storage_source")"
+storage_type="Block storage"
+case "$storage_resolved" in
+  *mmcblk*)
+    storage_block="$(basename "$storage_resolved" | sed 's/p[0-9][0-9]*$//')"
+    mmc_type="$(cat "/sys/class/block/$storage_block/device/type" 2>/dev/null | tr -d '\r\n')"
+    case "$mmc_type" in
+      MMC) storage_type="eMMC" ;;
+      SD) storage_type="SD card" ;;
+      *) storage_type="SD/MMC" ;;
+    esac
+    ;;
+  *ubi*|*mtd*) storage_type="NAND/UBI" ;;
+  *nvme*) storage_type="NVMe" ;;
+esac
+if [ "$storage_type" = "Block storage" ]; then
+  case "$hardware_sku" in
+    *sdmmc*) storage_type="SD/MMC" ;;
+    *emmc*) storage_type="eMMC" ;;
+  esac
+fi
+storage_stats="$(df -kP /userdata 2>/dev/null | awk 'END { print $2 "|" $3 "|" $4 }')"
+old_ifs="$IFS"
+IFS='|'
+set -- $storage_stats
+IFS="$old_ifs"
+storage_total_kb="${1:-0}"
+storage_used_kb="${2:-0}"
+storage_free_kb="${3:-0}"
+
+mem_total_kb="$(meminfo_kb MemTotal)"
+mem_free_kb="$(meminfo_kb MemFree)"
+mem_available_kb="$(meminfo_kb MemAvailable)"
+mem_buffers_kb="$(meminfo_kb Buffers)"
+mem_cached_kb="$(meminfo_kb Cached)"
+mem_reclaimable_kb="$(meminfo_kb SReclaimable)"
+mem_shmem_kb="$(meminfo_kb Shmem)"
+mem_total_kb="${mem_total_kb:-0}"
+mem_free_kb="${mem_free_kb:-0}"
+mem_available_kb="${mem_available_kb:-$mem_free_kb}"
+mem_buffers_kb="${mem_buffers_kb:-0}"
+mem_cached_kb="${mem_cached_kb:-0}"
+mem_reclaimable_kb="${mem_reclaimable_kb:-0}"
+mem_shmem_kb="${mem_shmem_kb:-0}"
+mem_cache_kb=$((mem_buffers_kb + mem_cached_kb + mem_reclaimable_kb - mem_shmem_kb))
+[ "$mem_cache_kb" -ge 0 ] || mem_cache_kb=0
+mem_used_kb=$((mem_total_kb - mem_free_kb - mem_cache_kb))
+mem_allocated_kb=$((mem_total_kb - mem_available_kb))
+[ "$mem_allocated_kb" -ge 0 ] || mem_allocated_kb=0
+[ "$mem_used_kb" -ge 0 ] || mem_used_kb=0
+
+section "SYSTEM SUMMARY"
+printf 'App version: %s\n' "$app_version"
+printf 'System version: %s\n' "$system_version"
+printf 'Model / SKU: %s\n' "$hardware_sku"
+printf 'Revision: %s\n' "$app_revision"
+printf 'Storage summary: %s - %s total, %s used, %s free (%s)\n' "$storage_type" "$(format_kb "$storage_total_kb")" "$(format_kb "$storage_used_kb")" "$(format_kb "$storage_free_kb")" "$storage_source"
+printf 'RAM summary: %s total, %s used, %s allocated, %s available, %s cache/buffers\n' "$(format_kb "$mem_total_kb")" "$(format_kb "$mem_used_kb")" "$(format_kb "$mem_allocated_kb")" "$(format_kb "$mem_available_kb")" "$(format_kb "$mem_cache_kb")"
+
+section "VERSION DETAILS"
+[ -n "$build_info" ] && printf '%s\n' "$build_info"
 uname -a 2>/dev/null || true
 
 section "UPTIME AND LOAD"
@@ -5658,7 +5738,7 @@ Tailscale tab
 - Remove Tailscale logs out where possible, stops Tailscale, removes /userdata/tailscale, and reboots the JetKVM.
 
 Diagnostics tab
-- Quick check collects versions, uptime/load, memory, D-state processes, important services, network, storage, Tailscale, watchdog state, and recent kernel messages.
+- Quick check fills the system summary box with app/system versions, model/SKU, revision, storage type and usage, and RAM total/used/allocated/available/cache figures. It also logs uptime/load, D-state processes, important services, network, Tailscale, watchdog state, and recent kernel messages.
 - Save full report adds the JetKVM application log, crash dumps, process list, HDMI/USB state, thermal readings, persistent-file inventory, and full kernel log. Reports can contain IP/MAC/device identifiers and log content; review them before sharing.
 - View app log reads /userdata/jetkvm/last.log. View crash logs reads /userdata/jetkvm/crashdump.
 - Reboot requests a normal Linux reboot. Force reboot uses reboot -f and should only be used when a normal reboot does not recover the device.
@@ -6295,10 +6375,10 @@ Inventory tab
     $diagnosticsGrid.AutoSize = $true
     $diagnosticsGrid.AutoSizeMode = [Windows.Forms.AutoSizeMode]::GrowAndShrink
     $diagnosticsGrid.ColumnCount = 1
-    $diagnosticsGrid.RowCount = 3
+    $diagnosticsGrid.RowCount = 4
     $diagnosticsGrid.Padding = New-ScaledPadding 8 4 8 2
     $diagnosticsGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 100)) | Out-Null
-    for ($i = 0; $i -lt 3; $i++) {
+    for ($i = 0; $i -lt 4; $i++) {
         $diagnosticsGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::AutoSize)) | Out-Null
     }
     $diagnosticsIntro = New-RowLabel "Read-only SSH checks using the Setup address and key. Quick check covers health; full report adds logs and crash dumps."
@@ -6314,9 +6394,93 @@ Inventory tab
     $viewAppLogButton = & $newDiagnosticsButton "View app log"
     $viewCrashLogsButton = & $newDiagnosticsButton "View crash logs"
     $diagnosticsActions.Controls.AddRange(@($quickDiagnosticsButton, $saveDiagnosticsButton, $viewAppLogButton, $viewCrashLogsButton))
+
+    $diagnosticsSummaryPanel = [Windows.Forms.Panel]::new()
+    $diagnosticsSummaryPanel.Dock = "Top"
+    $diagnosticsSummaryPanel.AutoSize = $true
+    $diagnosticsSummaryPanel.AutoSizeMode = [Windows.Forms.AutoSizeMode]::GrowAndShrink
+    $diagnosticsSummaryPanel.BorderStyle = [Windows.Forms.BorderStyle]::FixedSingle
+    $diagnosticsSummaryPanel.BackColor = $ui.Surface2
+    $diagnosticsSummaryPanel.Padding = New-ScaledPadding 9 7 9 7
+    $diagnosticsSummaryPanel.Margin = New-ScaledPadding 0 5 0 5
+
+    $diagnosticsSummaryGrid = [Windows.Forms.TableLayoutPanel]::new()
+    $diagnosticsSummaryGrid.Dock = "Top"
+    $diagnosticsSummaryGrid.AutoSize = $true
+    $diagnosticsSummaryGrid.AutoSizeMode = [Windows.Forms.AutoSizeMode]::GrowAndShrink
+    $diagnosticsSummaryGrid.ColumnCount = 4
+    $diagnosticsSummaryGrid.RowCount = 6
+    $diagnosticsSummaryGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, (S 112))) | Out-Null
+    $diagnosticsSummaryGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 50)) | Out-Null
+    $diagnosticsSummaryGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Absolute, (S 112))) | Out-Null
+    $diagnosticsSummaryGrid.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new([Windows.Forms.SizeType]::Percent, 50)) | Out-Null
+    for ($i = 0; $i -lt 6; $i++) {
+        $diagnosticsSummaryGrid.RowStyles.Add([Windows.Forms.RowStyle]::new([Windows.Forms.SizeType]::AutoSize)) | Out-Null
+    }
+
+    function New-DiagnosticsSummaryValue {
+        $label = New-RowLabel "Not checked"
+        $label.AutoSize = $true
+        $label.Dock = "Top"
+        $label.ForeColor = $ui.Text
+        $label.Font = [Drawing.Font]::new("Segoe UI", 9, [Drawing.FontStyle]::Bold)
+        $label.Padding = New-ScaledPadding 0 2 8 3
+        $label.AutoEllipsis = $true
+        return $label
+    }
+
+    $diagnosticsSummaryTitle = New-RowLabel "JetKVM system summary - run Quick check to populate"
+    $diagnosticsSummaryTitle.AutoSize = $true
+    $diagnosticsSummaryTitle.Dock = "Top"
+    $diagnosticsSummaryTitle.Font = [Drawing.Font]::new("Segoe UI", 9, [Drawing.FontStyle]::Bold)
+    $diagnosticsSummaryTitle.ForeColor = $ui.Info
+    $diagnosticsSummaryTitle.Padding = New-ScaledPadding 0 0 0 4
+    $diagnosticsSummaryGrid.Controls.Add($diagnosticsSummaryTitle, 0, 0)
+    $diagnosticsSummaryGrid.SetColumnSpan($diagnosticsSummaryTitle, 4)
+
+    $diagnosticsSummaryRows = [ordered]@{
+        "App version" = New-DiagnosticsSummaryValue
+        "System version" = New-DiagnosticsSummaryValue
+        "Model / SKU" = New-DiagnosticsSummaryValue
+        "Revision" = New-DiagnosticsSummaryValue
+        "Storage" = New-DiagnosticsSummaryValue
+        "RAM" = New-DiagnosticsSummaryValue
+    }
+    $summaryPairs = @(
+        [pscustomobject]@{ Left = "App version"; Right = "System version" }
+    )
+    $summaryRow = 1
+    foreach ($pair in $summaryPairs) {
+        $leftName = New-RowLabel $pair.Left
+        $leftName.AutoSize = $true
+        $leftName.ForeColor = $ui.Muted
+        $leftName.Padding = New-ScaledPadding 0 2 4 3
+        $rightName = New-RowLabel $pair.Right
+        $rightName.AutoSize = $true
+        $rightName.ForeColor = $ui.Muted
+        $rightName.Padding = New-ScaledPadding 0 2 4 3
+        $diagnosticsSummaryGrid.Controls.Add($leftName, 0, $summaryRow)
+        $diagnosticsSummaryGrid.Controls.Add($diagnosticsSummaryRows[$pair.Left], 1, $summaryRow)
+        $diagnosticsSummaryGrid.Controls.Add($rightName, 2, $summaryRow)
+        $diagnosticsSummaryGrid.Controls.Add($diagnosticsSummaryRows[$pair.Right], 3, $summaryRow)
+        $summaryRow++
+    }
+    foreach ($wideName in @("Model / SKU", "Revision", "Storage", "RAM")) {
+        $nameLabel = New-RowLabel $wideName
+        $nameLabel.AutoSize = $true
+        $nameLabel.ForeColor = $ui.Muted
+        $nameLabel.Padding = New-ScaledPadding 0 2 4 3
+        $diagnosticsSummaryGrid.Controls.Add($nameLabel, 0, $summaryRow)
+        $diagnosticsSummaryGrid.Controls.Add($diagnosticsSummaryRows[$wideName], 1, $summaryRow)
+        $diagnosticsSummaryGrid.SetColumnSpan($diagnosticsSummaryRows[$wideName], 3)
+        $summaryRow++
+    }
+    $diagnosticsSummaryPanel.Controls.Add($diagnosticsSummaryGrid)
+
     $diagnosticsGrid.Controls.Add($diagnosticsIntro, 0, 0)
     $diagnosticsGrid.Controls.Add($diagnosticsPrivacy, 0, 1)
-    $diagnosticsGrid.Controls.Add($diagnosticsActions, 0, 2)
+    $diagnosticsGrid.Controls.Add($diagnosticsSummaryPanel, 0, 2)
+    $diagnosticsGrid.Controls.Add($diagnosticsActions, 0, 3)
     $diagnosticsGroup.Controls.Add($diagnosticsGrid)
     $diagnosticsLayout.Controls.Add($diagnosticsGroup, 0, 0)
 
@@ -8319,7 +8483,24 @@ Inventory tab
             & $log "--- JetKVM quick diagnostics ---"
             $command = ConvertTo-JetKvmEncodedShellCommand -Script (Get-JetKvmQuickDiagnosticsCommand)
             $result = Invoke-JetKvmSshCommand -JetKvmAddress $target.Ip -KeyPath $target.KeyPath -Command $command -TimeoutSeconds 75
-            & $writeSshOutput $result
+            if ($result.Output) {
+                $cleanOutput = Remove-AnsiEscapeSequences -Text $result.Output
+                foreach ($line in ($cleanOutput -split "`n")) {
+                    $summaryMatch = [regex]::Match($line, '^(App version|System version|Model / SKU|Revision|Storage summary|RAM summary):\s*(.*)$')
+                    if ($summaryMatch.Success) {
+                        $summaryName = $summaryMatch.Groups[1].Value
+                        if ($summaryName -eq "Storage summary") { $summaryName = "Storage" }
+                        elseif ($summaryName -eq "RAM summary") { $summaryName = "RAM" }
+                        if ($diagnosticsSummaryRows.Contains($summaryName)) {
+                            $diagnosticsSummaryRows[$summaryName].Text = $summaryMatch.Groups[2].Value.Trim()
+                            $diagnosticsSummaryRows[$summaryName].ForeColor = $ui.Good
+                        }
+                    }
+                    & $log $line
+                }
+                $diagnosticsSummaryTitle.Text = "JetKVM system summary - last checked $(Get-Date -Format 'HH:mm:ss')"
+                $diagnosticsSummaryTitle.ForeColor = $ui.Good
+            }
             if ($result.TimedOut) { throw "JetKVM quick diagnostics timed out after 75 seconds." }
             if ($result.ExitCode -ne 0) { throw "JetKVM quick diagnostics failed with exit code $($result.ExitCode)." }
             & $setBusy $false "Diagnostics complete"
